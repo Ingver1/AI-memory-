@@ -1,89 +1,120 @@
-"""Security utilities including PII filtering and encryption."""
-
-import hmac
-import re
-import secrets
-import time
-import threading
-from typing import Any, Dict, List, Optional, Tuple
+"""Security utilities for encryption and signing operations."""
+from typing import Tuple, Union
 
 from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import jwt
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-class PIIPatterns:
-    """Predefined regex patterns for personally identifiable information (PII)."""
-    EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-    CREDIT_CARD = re.compile(r"\b(?:\d{4}[-\s]?){3}\d{4}\b")
-    SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-    PHONE = re.compile(r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")
-    IP_ADDRESS = re.compile(r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b")
-    API_KEY = re.compile(r"\b[A-Za-z0-9]{32,}\b")
-    UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE)
-    IBAN = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b")
-    CREDIT_CARD_SIMPLE = re.compile(r"\b\d{13,19}\b")
-    PASSPORT = re.compile(r"\b[A-Z]{1,2}\d{6,9}\b")
-    DRIVERS_LICENSE = re.compile(r"\b[A-Z]{1,2}\d{6,8}\b")
+def generate_symmetric_key() -> bytes:
+    """Generate a new Fernet (symmetric) encryption key."""
+    return Fernet.generate_key()
 
-class EnhancedPIIFilter:
-    """Utility for detecting and redacting PII (Personally Identifiable Information) in text."""
-    def __init__(self, custom_patterns: Optional[Dict[str, re.Pattern]] = None):
-        # Default patterns can be extended with custom ones
-        self.patterns: Dict[str, re.Pattern] = {
-            "email": PIIPatterns.EMAIL,
-            "credit_card": PIIPatterns.CREDIT_CARD,
-            "ssn": PIIPatterns.SSN,
-            "phone": PIIPatterns.PHONE,
-            "ip_address": PIIPatterns.IP_ADDRESS,
-            "api_key": PIIPatterns.API_KEY,
-            "uuid": PIIPatterns.UUID,
-            "iban": PIIPatterns.IBAN,
-            "passport": PIIPatterns.PASSPORT,
-        }
-        if custom_patterns:
-            self.patterns.update(custom_patterns)
-        # Statistics for detections
-        self.stats: Dict[str, int] = {k: 0 for k in self.patterns}
+def encrypt_data(data: Union[str, bytes], key: Union[str, bytes]) -> bytes:
+    """
+    Encrypt data using a Fernet symmetric key.
+    
+    Args:
+        data: The plaintext data to encrypt (string or bytes).
+        key: The Fernet key to use for encryption (string or bytes).
+    
+    Returns:
+        The encrypted data (bytes).
+    """
+    key_bytes = key.encode() if isinstance(key, str) else key
+    data_bytes = data.encode() if isinstance(data, str) else data
+    fernet = Fernet(key_bytes)
+    return fernet.encrypt(data_bytes)
 
-    def detect(self, text: str) -> Dict[str, List[str]]:
-        """Detect all PII occurrences in the text. Returns a dict of pattern name to list of matches."""
-        detections: Dict[str, List[str]] = {}
-        for name, pattern in self.patterns.items():
-            matches = pattern.findall(text)
-            if matches:
-                detections[name] = matches
-                self.stats[name] += len(matches)
-        return detections
+def decrypt_data(token: bytes, key: Union[str, bytes]) -> bytes:
+    """
+    Decrypt data using a Fernet symmetric key.
+    
+    Args:
+        token: The encrypted data (bytes).
+        key: The Fernet key used for encryption (string or bytes).
+    
+    Returns:
+        The decrypted data (bytes).
+    """
+    key_bytes = key.encode() if isinstance(key, str) else key
+    fernet = Fernet(key_bytes)
+    return fernet.decrypt(token)
 
-    def redact(self, text: str) -> Tuple[str, bool, List[str]]:
-        """Redact all PII in the text by replacing with placeholders. Returns (redacted_text, found_any, types_found)."""
-        found_types: List[str] = []
-        redacted_text = text
-        for name, pattern in self.patterns.items():
-            if pattern.search(redacted_text):
-                found_types.append(name)
-                self.stats[name] += len(pattern.findall(redacted_text))
-                redacted_text = pattern.sub(f"[{name.upper()}_REDACTED]", redacted_text)
-        return redacted_text, bool(found_types), found_types
+def generate_rsa_key_pair(key_size: int = 2048) -> Tuple[bytes, bytes]:
+    """
+    Generate an RSA private/public key pair.
+    
+    Args:
+        key_size: The length of the RSA key in bits (default: 2048).
+    
+    Returns:
+        A tuple (private_key_bytes, public_key_bytes) in PEM format.
+    """
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+    public_key = private_key.public_key()
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return private_pem, public_pem
 
-    def partial_redact(self, text: str, preserve_chars: int = 2) -> Tuple[str, bool, List[str]]:
-        """Partially redact PII by replacing the middle of matches with asterisks. Preserves first/last N characters."""
-        found_types: List[str] = []
-        redacted_text = text
+def sign_data(data: Union[str, bytes], private_key_pem: Union[str, bytes]) -> bytes:
+    """
+    Sign data using an RSA private key with PSS padding (SHA-256).
+    
+    Args:
+        data: The data to sign (string or bytes).
+        private_key_pem: The RSA private key in PEM format (string or bytes).
+    
+    Returns:
+        The signature (bytes).
+    """
+    data_bytes = data.encode() if isinstance(data, str) else data
+    key_bytes = private_key_pem.encode() if isinstance(private_key_pem, str) else private_key_pem
+    private_key = serialization.load_pem_private_key(key_bytes, password=None)
+    signature = private_key.sign(
+        data_bytes,
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH
+        ),
+        hashes.SHA256()
+    )
+    return signature
 
-        def _partial_replace(match: re.Match) -> str:
-            val = match.group(0)
-            if len(val) <= preserve_chars * 2:
-                return "*" * len(val)
-            return f"{val[:preserve_chars]}{'*' * (len(val) - preserve_chars * 2)}{val[-preserve_chars:]}"
-
-        for name, pattern in self.patterns.items():
-            if pattern.search(redacted_text):
-                found_types.append(name)
-                self.stats[name] += len(pattern.findall(redacted_text))
-                redacted_text = pattern.sub(_partial_replace, redacted_text)
-        return redacted_text, bool(found_types), found_types
-
-# (Encryption and authentication utilities like hashing, token generation could be added here, with proper docstrings.)
-# For brevity, these are not expanded upon.
+def verify_signature(data: Union[str, bytes], signature: bytes, public_key_pem: Union[str, bytes]) -> bool:
+    """
+    Verify an RSA signature using PSS padding (SHA-256).
+    
+    Args:
+        data: The original data that was signed (string or bytes).
+        signature: The signature to verify (bytes).
+        public_key_pem: The RSA public key in PEM format (string or bytes).
+    
+    Returns:
+        True if the signature is valid, False otherwise.
+    """
+    data_bytes = data.encode() if isinstance(data, str) else data
+    key_bytes = public_key_pem.encode() if isinstance(public_key_pem, str) else public_key_pem
+    public_key = serialization.load_pem_public_key(key_bytes)
+    try:
+        public_key.verify(
+            signature,
+            data_bytes,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        return True
+    except InvalidSignature:
+        return False
+    except Exception:
+        return False
