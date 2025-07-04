@@ -1,0 +1,49 @@
+# AI Memory System Configuration
+memory:
+  storage_type: "hybrid"  # Options: vector, graph, hybrid
+  
+  # Vector database configuration
+  vector_db:
+    provider: "chroma"  # Options: chroma, pinecone, faiss
+    dimension: 1536
+    metric: "cosine"
+    index_name: "ai-memory-index"
+    
+  # Embedding model configuration
+  embedding:
+    model: "text-embedding-3-small"
+    batch_size: 100
+    cache_size: 10000
+    max_retries: 3
+    
+  # Memory retrieval settings
+  retrieval:
+    default_k: 5
+    similarity_threshold: 0.7
+    enable_reranking: true
+    max_results: 20
+    
+  # Memory types configuration
+  memory_types:
+    short_term:
+      max_size: 1000
+      ttl: 3600  # Time to live in seconds
+    long_term:
+      consolidation_interval: 86400
+      importance_threshold: 0.8
+      
+# API Configuration
+api:
+  host: "0.0.0.0"
+  port: 8000
+  debug: false
+  
+# Logging configuration
+logging:
+  level: "INFO"
+  format: "json"
+  
+# Database configuration
+database:
+  url: "sqlite:///ai_memory.db"
+  echo: false
