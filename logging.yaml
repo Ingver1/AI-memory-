@@ -1,0 +1,63 @@
+logging.yaml — Unified Memory System
+
+
+
+Load from Python with:
+
+import yaml, logging.config, pathlib, os
+
+cfg = yaml.safe_load(pathlib.Path('logging.yaml').read_text())
+
+logging.config.dictConfig(cfg)
+
+
+
+The config respects ENV vars:
+
+LOG_LEVEL   – root level (default INFO)
+
+LOG_JSON    – "1" to enable JSON output for console
+
+
+
+version: 1
+
+---------------------------------------------------------------------------
+
+Formatters
+
+---------------------------------------------------------------------------
+
+formatters: console: (): "logging.Formatter" format: "%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s" datefmt: "%Y-%m-%d %H:%M:%S"
+
+file: (): "logging.Formatter" format: "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d | %(message)s" datefmt: "%Y-%m-%d %H:%M:%S"
+
+json: (): "pythonjsonlogger.jsonlogger.JsonFormatter" format: "%(asctime)s %(levelname)s %(name)s %(message)s" %(pattern)s
+
+---------------------------------------------------------------------------
+
+Handlers
+
+---------------------------------------------------------------------------
+
+handlers: console: class: logging.StreamHandler level: DEBUG formatter: console stream: ext://sys.stdout
+
+json_console: class: logging.StreamHandler level: DEBUG formatter: json stream: ext://sys.stdout
+
+file: class: logging.handlers.RotatingFileHandler level: DEBUG formatter: file filename: ums.log maxBytes: 10485760   # 10MB backupCount: 5
+
+---------------------------------------------------------------------------
+
+Loggers
+
+---------------------------------------------------------------------------
+
+loggers: memory_system: level: INFO handlers: [console] propagate: no
+
+---------------------------------------------------------------------------
+
+Root logger
+
+---------------------------------------------------------------------------
+
+root: level: "${LOG_LEVEL:-INFO}" handlers: - "${LOG_JSON:-0}"  # evaluated by loader wrapper, not by logging itself

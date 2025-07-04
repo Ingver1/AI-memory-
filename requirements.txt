@@ -1,0 +1,42 @@
+# Unified Memory System v0.8-alpha — Core Dependencies (FIXED)
+# ----------------------------------------------------
+# GPU users: swap `faiss-cpu` for `faiss-gpu>=1.7.4,<2.0.0`
+
+# ───────────── Framework ─────────────
+fastapi>=0.109.0,<0.110.0            # Latest stable with Pydantic v2 fixes
+uvicorn[standard]>=0.27.0,<0.28.0    # Updated for compatibility
+pydantic>=2.6.0,<3.0.0
+pydantic-settings>=2.2.0,<3.0.0      # Updated for latest fixes
+
+# ───── ML / Vector Search ─────
+faiss-cpu>=1.7.4,<2.0.0
+sentence-transformers>=2.2.2,<3.0.0
+torch>=2.1.0,<3.0.0
+numpy>=1.24.0,<2.0.0
+
+# ─── Database / Storage ───
+aiosqlite>=0.19.0,<1.0.0
+cryptography>=42.0.0,<43.0.0        # Fernet encryption
+
+# ───── Security / Auth ─────
+PyJWT>=2.8.0,<3.0.0
+passlib[bcrypt]>=1.7.4,<2.0.0
+python-multipart>=0.0.9,<1.0.0      # Updated to fix deprecation warning
+
+# ────── Monitoring ──────
+prometheus-client>=0.19.0,<1.0.0
+psutil>=5.9.0,<6.0.0
+
+# ─────── HTTP / I/O ───────
+httpx>=0.26.0,<0.27.0               # compatible with anyio 3.x
+requests>=2.32.0,<3.0.0
+
+# ─── Concurrency backend ───
+anyio>=3.7.1,<4.0.0                 # FastAPI 0.109 requirement
+
+# ────── Utilities ──────
+python-dotenv>=1.0.0,<2.0.0
+rich>=13.6.0,<14.0.0
+typer>=0.9.0,<1.0.0                 # CLI framework
+python-dateutil>=2.8.2,<3.0.0
+orjson>=3.9.0,<4.0.0                # Fast JSON
