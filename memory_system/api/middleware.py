@@ -1,16 +1,11 @@
-"""middleware.py — global FastAPI middlewares for Unified Memory System
+"""middleware.py — FastAPI middlewares for Unified Memory System (v0.8-alpha).
 
-Version: 0.8-alpha
-
-This module ships three core middlewares and a lightweight dependency checker:
-• SessionTracker — in-memory helper that records the last activity timestamp per user.
-• RateLimitingMiddleware — token-bucket rate limiting per user / IP.
-• MaintenanceModeMiddleware — graceful shutdown gate that denies traffic while the
-  service is in maintenance.
-• check_dependencies() — async helper used by health routes to verify that optional
-  third-party libraries are importable at runtime.
+Includes:
+- SessionTracker: in-memory tracker for user activity timestamps.
+- RateLimitingMiddleware: token-bucket rate limiting per user/IP.
+- MaintenanceModeMiddleware: gate that blocks requests during maintenance mode.
+- check_dependencies(): utility to verify optional dependencies at runtime.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -27,6 +22,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import JSONResponse, Response
 
 __all__ = [
+    "session_tracker",
     "SessionTracker",
     "RateLimitingMiddleware",
     "MaintenanceModeMiddleware",
@@ -35,67 +31,47 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
-###############################################################################
-# Session tracking helper                                                     #
-###############################################################################
-
+# Session tracking helper
 
 class SessionTracker:
-    """Thread-safe tracker that records last activity timestamps.
-
-    A single process-wide instance is usually enough. In production you can
-    replace it with Redis or another distributed key/value store.
-    """
+    """Thread-safe tracker that records the last activity timestamp per user."""
 
     _last_seen: MutableMapping[str, float] = {}
-    _lock: asyncio.Lock = asyncio.Lock()
+    _lock = asyncio.Lock()
 
     @classmethod
     async def mark(cls, user_id: str) -> None:
-        """Register current UTC timestamp for *user_id*."""
+        """Register the current UTC timestamp for the given user_id."""
         async with cls._lock:
             cls._last_seen[user_id] = time.time()
 
     @classmethod
     async def active_count(cls, window_seconds: int = 3600) -> int:
-        """Return number of users seen in the last *window_seconds*."""
+        """Return count of users seen within the last window (seconds)."""
         threshold = time.time() - window_seconds
         async with cls._lock:
             return sum(1 for ts in cls._last_seen.values() if ts >= threshold)
 
-    def values(self):
-        """Return all tracked timestamps."""
-        return self._last_seen.values()
-
+    @classmethod
+    def values(cls) -> list[float]:
+        """Return a list of all tracked last-seen timestamps."""
+        # No lock needed for atomic retrieval of values reference
+        return list(cls._last_seen.values())
 
 # Global session tracker instance
 session_tracker = SessionTracker()
 
-
-###############################################################################
-# Rate limiting                                                               #
-###############################################################################
-
+# Rate limiting middleware
 
 class RateLimitingMiddleware(BaseHTTPMiddleware):
-    """Simple token-bucket rate limiting per user / IP.
-
-    Parameters
-    ----------
-    max_requests
-        Allowed requests per sliding window.
-    window_seconds
-        Duration of the sliding window in seconds.
-    bypass_endpoints
-        Set of URL paths that skip rate limiting (health, docs, etc.).
-    """
+    """Token-bucket rate limiting per user or client IP address."""
 
     def __init__(
-        self,
-        app,
-        max_requests: int = 100,
-        window_seconds: int = 60,
-        bypass_endpoints: Set[str] | None = None,
+        self, 
+        app, 
+        max_requests: int = 100, 
+        window_seconds: int = 60, 
+        bypass_endpoints: Optional[Set[str]] = None
     ) -> None:
         super().__init__(app)
         self.max_requests = max_requests
@@ -108,60 +84,48 @@ class RateLimitingMiddleware(BaseHTTPMiddleware):
             "/openapi.json",
             "/favicon.ico",
         }
-        # user_id -> deque[timestamps]
+        # Maps user_id -> deque of request timestamps
         self._hits: Dict[str, deque[float]] = {}
         self._lock = asyncio.Lock()
 
-    # ---------------------------------------------------------------------
     @staticmethod
     def _get_user_id(request: Request) -> str:
-        """Derive a stable identifier from Authorization header or client IP."""
+        """Derive a stable ID from the Authorization header or client IP."""
         auth = request.headers.get("authorization") or getattr(request.client, "host", "unknown")
         return hashlib.sha256(auth.encode()).hexdigest()
 
-    # ---------------------------------------------------------------------
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:  # type: ignore[override]
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        # Skip rate limiting for bypassed endpoints
         if request.url.path in self.bypass:
             return await call_next(request)
 
         user_id = self._get_user_id(request)
         now = time.time()
-
         async with self._lock:
             bucket = self._hits.setdefault(user_id, deque())
-            # Drop timestamps older than the window
+            # Drop timestamps older than the time window
             while bucket and bucket[0] <= now - self.window:
                 bucket.popleft()
             if len(bucket) >= self.max_requests:
                 retry_after = int(bucket[0] + self.window - now) + 1
                 return JSONResponse(
                     status_code=429,
-                    content={
-                        "detail": "Rate limit exceeded",
-                        "retry_after": retry_after,
-                    },
+                    content={"detail": "Rate limit exceeded", "retry_after": retry_after},
                     headers={"Retry-After": str(retry_after)},
                 )
             bucket.append(now)
-
+        # Track active session
         await session_tracker.mark(user_id)
         return await call_next(request)
 
-
-###############################################################################
-# Maintenance mode                                                            #
-###############################################################################
-
+# Maintenance mode middleware
 
 class MaintenanceModeMiddleware(BaseHTTPMiddleware):
-    """Blocks all requests while the service is under maintenance.
+    """Middleware to block all non-exempt requests when maintenance mode is enabled."""
 
-    Toggle via the *UMS_MAINTENANCE* environment variable or by calling
-    `enable()` / `disable()` on the middleware instance.
-    """
-
-    def __init__(self, app, allowed_paths: Set[str] | None = None) -> None:
+    def __init__(self, app, allowed_paths: Optional[Set[str]] = None) -> None:
         super().__init__(app)
+        # Paths that are always allowed even during maintenance (e.g. admin toggle)
         self.allowed_paths: Set[str] = allowed_paths or {
             "/api/v1/admin/maintenance-mode",
             "/health",
@@ -170,46 +134,33 @@ class MaintenanceModeMiddleware(BaseHTTPMiddleware):
         }
         self._enabled: bool = os.getenv("UMS_MAINTENANCE", "0") == "1"
 
-    # Public helpers -------------------------------------------------------
     def enable(self) -> None:
-        """Enable maintenance mode at runtime."""
+        """Enable maintenance mode (start rejecting non-exempt requests)."""
         self._enabled = True
 
     def disable(self) -> None:
-        """Disable maintenance mode at runtime."""
+        """Disable maintenance mode (resume normal operation)."""
         self._enabled = False
 
-    # ---------------------------------------------------------------------
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:  # type: ignore[override]
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         if self._enabled and request.url.path not in self.allowed_paths:
+            # Return 503 Service Unavailable for blocked requests
             return JSONResponse(
                 status_code=503,
-                content={
-                    "detail": "Service temporarily unavailable due to maintenance",
-                    "retry_after": 60,
-                },
-                headers={"Retry-After": "60"},
+                content={"detail": "Service is under maintenance, please try later."}
             )
         return await call_next(request)
 
-
-###############################################################################
-# Dependency checker                                                          #
-###############################################################################
-
-_REQUIRED_MODULES = {
-    "faiss": "FAISS (vector search backend)",
-    "sentence_transformers": "SentenceTransformers (embedding models)",
-}
-
+# Dependency checker for health endpoints
 
 async def check_dependencies() -> Dict[str, bool]:
-    """Return a mapping of optional module names to their availability."""
+    """Check optional dependencies (like psutil, etc.) and return their availability."""
     results: Dict[str, bool] = {}
-    for module_name in _REQUIRED_MODULES:
-        try:
-            await asyncio.to_thread(importlib.import_module, module_name)
-            results[module_name] = True
-        except Exception:  # noqa: BLE001 — catch anything (importlib errors, etc.)
-            results[module_name] = False
+    # Example: check if psutil is installed
+    try:
+        importlib.import_module("psutil")
+        results["psutil"] = True
+    except ImportError:
+        results["psutil"] = False
+    # Additional dependency checks can be added here
     return results
