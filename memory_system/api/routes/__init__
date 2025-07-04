@@ -1,0 +1,8 @@
+# memory_system/api/routes/__init__.py
+"""API routes package."""
+
+from .health import router as health_router
+from .memory import router as memory_router
+from .admin import router as admin_router
+
+__all__ = ["health_router", "memory_router", "admin_router"]  # ADD memory_router
