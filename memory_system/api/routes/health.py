@@ -1,6 +1,6 @@
-"""
-Health-check and monitoring endpoints.
-"""
+"""Health-check and monitoring endpoints."""
+
+from __future__ import annotations
 
 import logging
 import platform
@@ -20,23 +20,23 @@ from memory_system.config.settings import UnifiedSettings
 log = logging.getLogger(__name__)
 router = APIRouter(tags=["Health & Monitoring"])
 
+# Dependency helpers for route functions
 
-# Dependency helpers (resolved via the DI container)
 async def _store() -> EnhancedMemoryStore:
+    """Dependency to get the global EnhancedMemoryStore (async)."""
     from memory_system.api.app import get_memory_store_instance
-
     return await get_memory_store_instance()
 
-
 def _settings() -> UnifiedSettings:
+    """Dependency to get current UnifiedSettings."""
     from memory_system.api.app import get_settings_instance
-
     return get_settings_instance()
 
+# Root endpoint (basic service info)
 
-# ───────────────────────────  root  ───────────────────────────
 @router.get("/", summary="Service info")
 async def root() -> Dict[str, Any]:
+    """Root health endpoint providing service information."""
     return {
         "service": "Unified Memory System",
         "version": "0.8-alpha",
@@ -47,22 +47,20 @@ async def root() -> Dict[str, Any]:
         "api_version": "v1",
     }
 
+# Full health check and liveness/readiness probes
 
-# ───────────────────────  health / live / ready  ───────────────────────
 @router.get("/health", response_model=HealthResponse, summary="Full health check")
 async def health_check(
     memory_store: EnhancedMemoryStore = Depends(_store),
     settings: UnifiedSettings = Depends(_settings),
 ) -> HealthResponse:
+    """Perform an in-depth health check of the system (components and dependencies)."""
     try:
         component = await memory_store.get_health()
         deps = await check_dependencies()
-
         overall_ok = component.healthy and all(deps.values())
         status = "healthy" if overall_ok else "degraded"
-
         stats = await memory_store.get_stats()
-
         return HealthResponse(
             status=status,
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -72,7 +70,7 @@ async def health_check(
             memory_store_health={
                 "total_memories": stats.get("total_memories", 0),
                 "index_size": stats.get("index_size", 0),
-                "cache_hit_rate": stats.get("cache_stats", {}).get("hit_rate", 0),
+                "cache_hit_rate": stats.get("cache_stats", {}).get("hit_rate", 0.0),
                 "buffer_size": stats.get("buffer_size", 0),
             },
             api_enabled=settings.api.enable_api,
@@ -82,41 +80,37 @@ async def health_check(
         return HealthResponse(
             status="unhealthy",
             timestamp=datetime.now(timezone.utc).isoformat(),
-            uptime_seconds=0,
+            uptime_seconds=0.0,
             version="0.8-alpha",
             checks={"health_check_error": False},
             memory_store_health={"error": str(e)},
             api_enabled=settings.api.enable_api,
         )
 
-
 @router.get("/health/live", summary="Liveness probe")
 async def liveness_probe() -> Dict[str, str]:
+    """Simple liveness probe endpoint (always returns alive if reachable)."""
     return {"status": "alive", "timestamp": datetime.now(timezone.utc).isoformat()}
-
 
 @router.get("/health/ready", summary="Readiness probe")
 async def readiness_probe(
     memory_store: EnhancedMemoryStore = Depends(_store),
 ) -> Dict[str, Any]:
+    """Readiness probe to check if the memory store is ready for requests."""
     component = await memory_store.get_health()
     if component.healthy:
         return {"status": "ready", "timestamp": datetime.now(timezone.utc).isoformat()}
     raise HTTPException(status_code=503, detail=f"Service not ready: {component.message}")
 
-
-# ───────────────────────────  stats  ───────────────────────────
 @router.get("/stats", response_model=StatsResponse, summary="System statistics")
 async def get_stats(
     memory_store: EnhancedMemoryStore = Depends(_store),
     settings: UnifiedSettings = Depends(_settings),
 ) -> StatsResponse:
+    """Retrieve current system and memory store statistics."""
     stats = await memory_store.get_stats()
-
-    # active session count (1-hour window)
-    current_time = datetime.now(tz=timezone.utc).timestamp()
+    current_time = datetime.now(timezone.utc).timestamp()
     active = sum(1 for ts in session_tracker.values() if ts > current_time - 3600)
-
     return StatsResponse(
         total_memories=stats.get("total_memories", 0),
         active_sessions=active,
@@ -134,22 +128,16 @@ async def get_stats(
         },
     )
 
-
-# ───────────────────────────  metrics  ───────────────────────────
 @router.get("/metrics", summary="Prometheus metrics")
-async def metrics(settings: UnifiedSettings = Depends(_settings)) -> Response:
+async def metrics_endpoint(settings: UnifiedSettings = Depends(_settings)) -> Response:
+    """Expose Prometheus metrics if enabled, otherwise 404."""
     if not settings.monitoring.enable_metrics:
         raise HTTPException(status_code=404, detail="Metrics disabled")
+    return Response(content=get_prometheus_metrics(), media_type=get_metrics_content_type())
 
-    return Response(
-        content=get_prometheus_metrics(),
-        media_type=get_metrics_content_type(),
-    )
-
-
-# ───────────────────────────  version  ───────────────────────────
 @router.get("/version", summary="Version info")
 async def get_version() -> Dict[str, Any]:
+    """Get version and environment details of the running service."""
     return {
         "version": "0.8-alpha",
         "api_version": "v1",
