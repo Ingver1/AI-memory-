@@ -48,7 +48,7 @@ class EmbeddingJob:
 # Embedding Service Implementation
 ###############################################################################
 
-class EnhancedEmbeddingService:
+class EmbeddingService:
     """Thread-safe, cache-aware embedding service.
     
     Public API consists of the `encode` method (async) and a few internal helpers.
