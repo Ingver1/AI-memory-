@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
@@ -76,25 +76,26 @@ async def create_memory(
             text=memory_data.text,
             role=memory_data.role,
             tags=memory_data.tags,
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
+            created_at=datetime.now(datetime.UTC) - timedelta(hours=1),
+            updated_at=datetime.now(datetime.UTC) - timedelta(hours=1),
         )
         
         log.info(f"Created memory {memory_id} for user {memory.user_id}")
         return memory
         
-    except EmbeddingError as e:
-        log.error(f"Failed to generate embedding: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Failed to generate embedding: {str(e)}"
-        )
-    except Exception as e:
-        log.error(f"Failed to create memory: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create memory"
-        )
+    except EmbeddingError as e:                                      # B904
+         log_error("Failed to generate query embedding: %s", e)
+         raise HTTPException(
+             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+             detail="Failed to generate query embedding",
+         ) from e
+
+    except Exception as e:                                          # B904
+         log_error("Failed to search memories: %s", e)
+         raise HTTPException(
+             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+             detail="Failed to search memories",
+         ) from e
 
 
 @router.get("/{memory_id}", response_model=MemoryRead)
@@ -273,16 +274,15 @@ async def search_memories(
         )
 
 
-@router.get("/", response_model=List[MemoryRead])
+@router.get("/", response_model=list[MemoryRead])
 async def list_memories(
-    user_id: Optional[str] = Query(None, description="User ID filter"),
-    role: Optional[str] = Query(None, description="Role filter"),
-    tags: Optional[List[str]] = Query(None, description="Tags filter"),
-    limit: int = Query(50, ge=1, le=1000, description="Maximum number of memories to return"),
-    offset: int = Query(0, ge=0, description="Number of memories to skip"),
-    store: EnhancedMemoryStore = Depends(get_memory_store),
-) -> List[MemoryRead]:
-    """List memories with optional filtering."""
+    user_id: str | None = Query(None, description="User ID filter"),
+) -> list[MemoryRead]:
+    """Return all memories, optionally filtered by user_id."""
+    store: EnhancedMemoryStore = request.app.state.store  # type: ignore[attr-defined]
+    raw_rows = await store.list_memories(user_id=user_id)
+    return [MemoryRead.model_validate(r) for r in raw_rows]
+    
     try:
         # In a real implementation, this would query the store with filters
         from datetime import datetime, timezone
