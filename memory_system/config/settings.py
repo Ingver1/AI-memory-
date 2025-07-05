@@ -71,7 +71,7 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
-class Settings(BaseSettings):
+class UnifiedSettings(BaseSettings):
     """Application settings loaded from env, optional files and defaults."""
 
     # ------------------------------------------------------------------ Core #
@@ -191,6 +191,6 @@ def get_settings() -> Settings:
             return _load_toml(path)
 
         Settings.settings_customise_sources = _settings_customise_sources  # type: ignore[attr-defined]
-        _settings = Settings()  # type: ignore[call-arg]
+        _settings = UnifiedSettings()  # type: ignore[call-arg]
 
     return _settings
