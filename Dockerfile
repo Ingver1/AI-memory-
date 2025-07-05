@@ -1,61 +1,60 @@
 # syntax=docker/dockerfile:1.6
 # -------------------------------------------------------------
-# Multi‑stage Dockerfile for AI‑memory‑ (image < 150 MB)
-# 1. Build stage   – python:3.11‑bookworm, compile wheels & install deps
-# 2. Runtime stage – python:3.11‑slim‑bookworm, copy wheels only
+# Multi‑stage Dockerfile for AI‑memory‑
+#   Stage 1: build – install deps with cached pip wheels
+#   Stage 2: runtime – copy wheels only → final image < 150 MB
 # -------------------------------------------------------------
 
-############################ 1️⃣ build‑stage ############################
+############################ 1️⃣  build stage ############################
 FROM python:3.11-bookworm AS build
 
-# Install system build deps only in builder image
-RUN apt-get update -qq \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    build-essential gcc \
-    libffi-dev libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Optional: label for build info
+LABEL org.opencontainers.image.source="https://github.com/Ingver1/AI-memory-"
+
+# Install system libs needed for compilation (kept only in build stage)
+RUN --mount=type=cache,target=/var/cache/apt \
+    apt-get update -y && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        libffi-dev \
+        git && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
-# Copy dependency manifests first (leverages Docker layer‑cache)
-COPY requirements*.txt ./
-# Enable BuildKit pip cache layer (~ /root/.cache/pip) to speed up rebuilds
+COPY pyproject.toml README.md /build/
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --upgrade pip \
- && pip wheel --wheel-dir /wheels -r requirements.txt
+    pip install --upgrade pip && \
+    pip wheel --no-deps --wheel-dir /wheels .[cli,dev]
 
-# Copy project source after deps (changes here bust cache only when src changes)
-COPY . /build/src
+# Copy the source after deps to leverage Docker cache
+COPY memory_system /build/memory_system
+COPY logging.yaml Dockerfile /build/
 
-# Install project into a temp location
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir --prefix=/install /build/src
+    pip wheel --no-deps --wheel-dir /wheels /build
 
-############################ 2️⃣ runtime‑stage ###########################
+############################ 2️⃣  runtime stage ############################
 FROM python:3.11-slim-bookworm AS runtime
-LABEL maintainer="Ingver1 <github.com/Ingver1>" \
-      org.opencontainers.image.source="https://github.com/Ingver1/AI-memory-" \
-      org.opencontainers.image.description="Self‑hosted AI memory service (FastAPI + FAISS)"
-
-# Workdir inside container
-WORKDIR /app
-
-# Copy Python env from build stage (only site‑packages & entrypoints)
-COPY --from=build /install /usr/local
-
-# Copy runtime assets (static files, logging config, etc.)
-COPY --chown=root:root logging.yaml ./
-COPY --chown=root:root memory_system ./memory_system
-
-# Non‑root user for security (optional)
-RUN useradd -m appuser && chown -R appuser:appuser /app
-USER appuser
 
 ENV PYTHONUNBUFFERED=1 \
-    PORT=8000 \
-    AI_MEMORY_SETTINGS=/app/settings.toml
+    PYTHONHASHSEED=random \
+    PIP_NO_PYTHON_VERSION_WARNING=1
 
-EXPOSE $PORT
+WORKDIR /app
 
-# Default command (can be overridden by docker‑compose / k8s)
+# Install only our own wheels & runtime dependencies
+COPY --from=build /wheels /wheels
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir --no-index --find-links=/wheels ai-memory && \
+    pip cache purge
+
+COPY memory_system /app/memory_system
+COPY logging.yaml /app/
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s CMD \
+  curl -f http://localhost:8000/health/live || exit 1
+
 ENTRYPOINT ["uvicorn", "memory_system.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
