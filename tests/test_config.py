@@ -479,7 +479,7 @@ class TestGetSettings:
         settings = get_settings("unknown")
         assert isinstance(settings, UnifiedSettings)
         # Should fall back to default settings
-        assert settings.version == "0.8-alpha"
+        assert settings.version == "0.8.0a0"
 
 
 class TestEnvironmentVariables:
