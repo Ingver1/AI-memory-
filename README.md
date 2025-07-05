@@ -111,14 +111,11 @@ docker compose up --build
 
 Architecture
 
-memory_system/
-      ├── api/            # FastAPI layers, routers, middleware
-      ├── core/           # embedding.py, index.py, vector_store.py, store.py
-      ├── utils/          # metrics.py, security.py, cache.py, exceptions.py
-      ├── db.py           # SQLite connection pool + migrations
-      └── settings.py     # Pydantic v2 config
-      └── config/         # configuration package
-         └── settings.py  # Pydantic v2 config
+   memory_system/
+       ├── api/            # FastAPI layers, routers, middleware
+       ├── core/           # embedding.py, index.py, vector_store.py, store.py
+       ├── utils/          # metrics, security, cache, exceptions
+       └── config/         # configuration package
 
 Major dependencies: FastAPI, Pydantic, FAISS, PyTorch, Prometheus client, SQLite / aiosqlite, cryptography.
 
