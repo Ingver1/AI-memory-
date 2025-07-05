@@ -1,111 +1,161 @@
-"""app.py — FastAPI application factory for Unified Memory System (v0.8-alpha)."""
+"""memory_system.api.app
+=======================
 
+FastAPI application instance for **AI‑memory‑**.
+
+Key points
+----------
+* **OpenTelemetry** middleware for distributed tracing (HTTP spans).
+* Lifespan‑managed singleton of :class:`~memory_system.core.store.SQLiteMemoryStore`
+  (no hidden globals → better test isolation).
+* Modular routers with Swagger tags and example payloads.
+"""
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Generator, Optional
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Path, status
 from fastapi.middleware.cors import CORSMiddleware
+from opentelemetry import trace
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 
-# Import routes and middleware lazily to avoid circular imports
-from memory_system.api.routes import health, admin, memory
-from memory_system.api.middleware import MaintenanceModeMiddleware, RateLimitingMiddleware
-from memory_system.config.settings import UnifiedSettings
-from memory_system.core.store import EnhancedMemoryStore
+from memory_system.config.settings import Settings, configure_logging, get_settings
+from memory_system.core.store import Memory, SQLiteMemoryStore, get_memory_store
 
 logger = logging.getLogger(__name__)
 
-# Global singleton instances (populated on app startup)
-_settings: Optional[UnifiedSettings] = None
-_memory_store: Optional[EnhancedMemoryStore] = None
-_rate_limiter: Optional[RateLimitingMiddleware] = None
-_maintenance_middleware: Optional[MaintenanceModeMiddleware] = None
 
-# Dependency getters for FastAPI
-
-def get_settings_instance() -> UnifiedSettings:
-    """Get or create the global UnifiedSettings singleton."""
-    global _settings
-    if _settings is None:
-        _settings = UnifiedSettings()  # Loads settings (from env, .env, etc.)
-        logger.info("✅ Settings loaded (environment profile: %s)", _settings.profile)
-    return _settings
-
-async def get_memory_store_instance() -> EnhancedMemoryStore:
-    """Get or initialize the global EnhancedMemoryStore singleton."""
-    global _memory_store
-    if _memory_store is None:
-        settings = get_settings_instance()
-        # Create the EnhancedMemoryStore in a thread to avoid blocking the event loop
-        _memory_store = await asyncio.to_thread(EnhancedMemoryStore, settings)
-        logger.info("✅ Memory store initialized")
-    return _memory_store
-
-def get_maintenance_middleware_instance() -> Optional[MaintenanceModeMiddleware]:
-    """Return the MaintenanceModeMiddleware instance, if initialized."""
-    return _maintenance_middleware
-
-# Application lifespan context for startup/shutdown
+# ---------------------------------------------------------------------------
+# Lifespan management                                                           
+# ---------------------------------------------------------------------------
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """Context manager for FastAPI app lifespan (setup and cleanup)."""
-    # On startup: initialize settings and memory store
-    settings = get_settings_instance()
-    await get_memory_store_instance()
-    logger.info("🚀 Unified Memory System v%s started (profile=%s)...", settings.version, settings.profile)
-    yield  # yield control back to FastAPI (run the app)
-    # On shutdown: clean up resources
-    if _memory_store is not None:
-        await _memory_store.close()
-        logger.info("🛑 Memory store closed – shutting down.")
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Create shared resources and tear them down at shutdown."""
 
-def create_app() -> FastAPI:
-    """Application factory that configures and returns a FastAPI app for UMS."""
-    settings = get_settings_instance()
-    app = FastAPI(
-        title="Unified Memory System",
-        description="Enterprise-grade memory system with vector search, FastAPI, and monitoring",
-        version=settings.version or "0.8-alpha",
-        lifespan=lifespan,
-        docs_url="/docs",
-        openapi_url="/openapi.json",
+    settings: Settings = get_settings()
+    configure_logging(settings)
+
+    # 1. Setup OpenTelemetry (stdout exporter for PoC; replace in prod)
+    resource = Resource(attributes={SERVICE_NAME: settings.service_name})
+    tracer_provider = TracerProvider(resource=resource)
+    tracer_provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+    trace.set_tracer_provider(tracer_provider)
+
+    # 2. Create memory store and attach to app state
+    memory_store = SQLiteMemoryStore(
+        dsn=settings.sqlite_dsn,
+        pool_size=settings.sqlite_pool_size,
     )
-    # Conditional CORS configuration
-    if settings.api.enable_cors:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=settings.api.cors_origins,
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
-    # Install global middlewares
-    maintenance = MaintenanceModeMiddleware(app)
-    app.add_middleware(RateLimitingMiddleware)
-    # Keep reference to maintenance middleware for runtime toggling
-    global _maintenance_middleware
-    _maintenance_middleware = maintenance
+    await memory_store.init()
+    app.state.memory_store = memory_store
+    logger.info("SQLiteMemoryStore initialised (pool=%s)…", settings.sqlite_pool_size)
 
-    # Include API route routers with version prefix
-    api_prefix = "/api/v1"
-    app.include_router(health.router, prefix=api_prefix)
-    app.include_router(admin.router, prefix=api_prefix)
-    app.include_router(memory.router, prefix=api_prefix)
+    try:
+        yield
+    finally:
+        await memory_store.close()
+        logger.info("SQLiteMemoryStore closed — bye!")
 
-    return app
 
-# CLI entry point for running directly
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "memory_system.api.app:create_app",
-        host="0.0.0.0",
-        port=8000,
-        factory=True,
-        reload=True,
-        log_level="info",
-    )
+# ---------------------------------------------------------------------------
+# FastAPI instance                                                              
+# ---------------------------------------------------------------------------
+
+app = FastAPI(
+    title="AI‑memory− API",
+    version="0.9.0",
+    lifespan=lifespan,
+    openapi_tags=[
+        {"name": "Memory", "description": "Create/search textual memories"},
+        {"name": "Health", "description": "Liveness and readiness probes"},
+    ],
+)
+
+# Instrument AFTER creation (so lifespan is wrapped as well)
+FastAPIInstrumentor.instrument_app(app)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Routers                                                                      
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/memory",
+    tags=["Memory"],
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a memory",
+    response_model=Memory,
+    responses={
+        201: {"description": "Memory stored", "model": Memory},
+        400: {"description": "Invalid payload"},
+    },
+    openapi_extra={
+        "examples": {
+            "basic": {
+                "summary": "Minimal payload",
+                "value": {
+                    "content": "I met John at the café today.",
+                    "metadata": {"importance": 0.8, "tags": ["social", "journal"]},
+                },
+            }
+        }
+    },
+)
+async def add_memory(
+    payload: Memory,
+    store: SQLiteMemoryStore = Depends(get_memory_store),
+) -> Memory:  # pragma: no cover — thin router layer
+    return await store.add_memory(payload)
+
+
+@app.get(
+    "/memory/{memory_id}",
+    tags=["Memory"],
+    summary="Retrieve a memory by ID",
+    response_model=Memory,
+)
+async def get_memory(
+    memory_id: str = Path(..., description="UUID of the stored memory"),
+    store: SQLiteMemoryStore = Depends(get_memory_store),
+) -> Memory:  # pragma: no cover
+    memory = await store.get_memory(memory_id)
+    if not memory:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return memory
+
+
+@app.get(
+    "/health/liveness",
+    tags=["Health"],
+    summary="Basic liveness probe",
+)
+async def liveness() -> dict[str, str]:  # pragma: no cover
+    return {"status": "ok"}
+
+
+@app.get(
+    "/health/readiness",
+    tags=["Health"],
+    summary="Database readiness probe",
+)
+async def readiness(store: SQLiteMemoryStore = Depends(get_memory_store)) -> dict[str, str]:  # pragma: no cover
+    try:
+        await store.ping()
+        return {"status": "ready"}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Readiness check failed: %s", exc)
+        raise HTTPException(status_code=503, detail="DB not ready") from exc
