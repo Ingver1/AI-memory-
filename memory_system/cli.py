@@ -1,142 +1,181 @@
-#!/usr/bin/env python3
-"""Command-line interface for Unified Memory System v0.8-alpha."""
+"""cli.py — Command‑line interface for **AI‑memory‑**
+===================================================
 
+This module exposes a small **Typer** application that lets you perform
+basic operations against the running memory store from the shell.  It is
+kept separate from the core library so heavy CLI‑only dependencies do
+not pollute production runtimes.
+
+Installation
+------------
+The extra "cli" introduces the ``typer`` and ``rich`` tread‑offs::
+
+    pip install "ai-memory[cli]"
+
+Usage examples
+--------------
+::
+
+    # Add a memory snippet
+    ai-memory add "Sky above Port‑Arthur was the color of television." \
+                 --metadata '{"source": "book", "title": "Neuromancer"}'
+
+    # Search for a fragment
+    ai-memory search "television" --limit 3
+
+    # Delete a memory by its UUID
+    ai-memory delete 1e638967-0f94-47ad-8f98-e9a3b61b62d3
+
+    # Bulk‑import from a NDJSON file
+    ai-memory import-json ./snippets.ndjson
+
+Notes
+-----
+* All commands run **asynchronously** using ``asyncio.run``.
+* The SQLite database location and pool size are read from
+  :pymod:`memory_system.config.settings` – override via environment
+  variables or config files.
+* Errors are rendered with coloured tracebacks using *rich*.
+"""
 from __future__ import annotations
 
 import asyncio
-import logging
-import os
+import json
 import sys
 from pathlib import Path
 from typing import Optional
 
 import typer
-import uvicorn
-from rich.console import Console
-from rich.table import Table
+from rich import print as rprint
+from rich.traceback import install as rich_tb_install
 
-from memory_system.config.settings import UnifiedSettings
-from memory_system.core.store import EnhancedMemoryStore
+from memory_system.config.settings import get_settings
+from memory_system.core.store import Memory, SQLiteMemoryStore
 
-log = logging.getLogger("ums.cli")
-console = Console()
+# pretty tracebacks for CLI users
+rich_tb_install(show_locals=False)
 
-app_cli = typer.Typer(
-    name="unified-memory",
-    help="Unified Memory System CLI",
-    add_completion=False,
-    rich_markup_mode="rich",
-)
+# ---------------------------------------------------------------------------
+# Typer application
+# ---------------------------------------------------------------------------
+app = typer.Typer(add_completion=False, rich_markup_mode="rich", no_args_is_help=True)
 
-VERSION = "0.8-alpha"
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-# ────────────────────────── Utility Functions ──────────────────────────
+def _get_store() -> SQLiteMemoryStore:
+    """Create a temporary store instance based on current Settings."""
 
-def _get_settings(env: Optional[str] = None) -> UnifiedSettings:
-    """Load UnifiedSettings for the specified environment profile."""
-    if env:
-        os.environ["ENVIRONMENT"] = env
-    return UnifiedSettings()
+    settings = get_settings()
+    return SQLiteMemoryStore(
+        dsn=settings.sqlite_dsn,
+        pool_size=settings.sqlite_pool_size,
+    )
 
-def _print_version() -> None:
-    """Print version information to the console."""
-    console.print(f"[bold green]Unified Memory System v{VERSION}[/bold green]")
-    console.print(f"Python {sys.version}")
-    console.print(f"Platform: {sys.platform}")
 
-def _print_settings_summary(settings: UnifiedSettings) -> None:
-    """Print a summary of the current configuration settings."""
-    table = Table(title="Configuration Summary")
-    table.add_column("Setting", style="cyan", no_wrap=True)
-    table.add_column("Value", style="magenta")
-    table.add_row("Environment", settings.profile)
-    table.add_row("Database Path", str(settings.database.db_path))
-    table.add_row("API Port", str(settings.api.port))
-    table.add_row("Workers", str(settings.performance.max_workers))
-    table.add_row("Cache Size", str(settings.performance.cache_size))
-    table.add_row("Metrics Enabled", str(settings.monitoring.enable_metrics))
-    table.add_row("Encryption", str(settings.security.encrypt_at_rest))
-    table.add_row("PII Filtering", str(settings.security.filter_pii))
-    console.print(table)
-
-# ────────────────────────── Server Commands ───────────────────────────
-
-@app_cli.command()
-def serve(
-    host: str = typer.Option("0.0.0.0", "--host", "-h", help="Host address to bind to"),
-    port: int = typer.Option(8000, "--port", "-p", help="Port to serve on"),
-    reload: bool = typer.Option(False, "--reload", "-r", help="Enable auto-reload for development"),
-    workers: int = typer.Option(1, "--workers", "-w", help="Number of worker processes"),
-    env: Optional[str] = typer.Option(None, "--env", "-e", help="Environment (development/production/testing)"),
-    log_level: str = typer.Option("info", "--log-level", "-l", help="Log level for the server"),
-) -> None:
-    """Start the Unified Memory System API server."""
-    settings = _get_settings(env)
-    console.print(f"[bold green]Starting Unified Memory System v{VERSION}[/bold green]")
-    _print_settings_summary(settings)
-
-    # Import here to avoid circular imports
-    from memory_system.api.app import create_app
-
-    # Override settings if provided via CLI options
-    if host and host != "0.0.0.0":
-        settings.api.host = host
-    if port and port != 8000:
-        settings.api.port = port
-
-    app = create_app()
+async def _safe_close(store: SQLiteMemoryStore) -> None:
+    """Ensure the store is closed even if an exception bubbles up."""
 
     try:
-        uvicorn.run(
-            app,
-            host=host,
-            port=port,
-            reload=reload,
-            workers=workers,
-            log_level=log_level.lower(),
-        )
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Shutting down gracefully...[/yellow]")
-    except Exception as e:
-        console.print(f"[red]Error starting server: {e}[/red]")
-        raise typer.Exit(code=1)
+        await store.close()
+    except Exception:  # pragma: no cover – log & swallow in CLI context
+        rprint("[yellow]Warning:[/] failed to close store cleanly.")
 
-# ──────────────────────── Health and Diagnostics ───────────────────────
 
-@app_cli.command()
-def health(
-    env: Optional[str] = typer.Option(None, "--env", "-e", help="Environment profile for settings"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed health info"),
-) -> None:
-    """Run health checks and connectivity diagnostics."""
-    settings = _get_settings(env)
-    console.print("[bold blue]Running health checks...[/bold blue]")
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
 
-    async def _health_check() -> None:
-        try:
-            store = EnhancedMemoryStore(settings)
-            health_status = await store.get_health()
-            if health_status.healthy:
-                console.print("[green]✓ System is healthy[/green]")
-                if verbose:
-                    table = Table(title="Health Details")
-                    table.add_column("Component", style="cyan")
-                    table.add_column("Status", style="green")
-                    for component, ok in health_status.checks.items():
-                        status_str = "OK" if ok else "FAIL"
-                        table.add_row(component, status_str)
-                    console.print(table)
-            else:
-                console.print("[yellow]System is degraded[/yellow]")
-                for comp, ok in health_status.checks.items():
-                    if not ok:
-                        console.print(f"[red]✗ {comp} not healthy[/red]")
-        except Exception as e:
-            console.print(f"[red]Health check failed: {e}[/red]")
-            raise typer.Exit(code=1)
-        finally:
-            # Ensure store is closed to release resources
-            await store.close()
 
-    # Run the asynchronous health check
-    asyncio.run(_health_check())
+@app.command(help="Add a single memory snippet to the store.")
+def add(
+    text: str = typer.Argument(..., help="Textual content of the memory"),
+    metadata: Optional[str] = typer.Option(
+        None,
+        "--metadata",
+        "-m",
+        help="JSON string with arbitrary key/values.",
+    ),
+):
+    """Insert new :class:`~memory_system.core.store.Memory`."""
+
+    async def _run() -> None:
+        store = _get_store()
+        data = json.loads(metadata) if metadata else None
+        await store.add_memory(text, data)
+        await _safe_close(store)
+        rprint("[green]✓ Added memory.")
+
+    asyncio.run(_run())
+
+
+@app.command(help="Perform semantic search across stored memories.")
+def search(
+    query: str = typer.Argument(..., help="Search query text"),
+    limit: int = typer.Option(5, "--limit", "-l", help="Max hits to return"),
+):
+    """Return up to *limit* memory rows sorted by similarity."""
+
+    async def _run() -> None:
+        store = _get_store()
+        results = await store.search_memory(query, limit)
+        await _safe_close(store)
+        if not results:
+            rprint("[yellow]No matches found.[/]")
+            return
+        for mem, score in results:
+            rprint(f"[bold]{score:.3f}[/] {mem.text} [dim]{mem.id}[/]")
+
+    asyncio.run(_run())
+
+
+@app.command(help="Delete a memory row by its UUID.")
+def delete(memory_id: str = typer.Argument(..., help="Memory UUID")) -> None:
+    async def _run() -> None:
+        store = _get_store()
+        await store.delete_memory(memory_id)
+        await _safe_close(store)
+        rprint("[green]✓ Deleted.")
+
+    asyncio.run(_run())
+
+
+@app.command("import-json", help="Bulk‑import memories from newline‑delimited JSON file.")
+def import_json(
+    path: Path = typer.Argument(..., exists=True, readable=True, help="NDJSON file path"),
+):
+    async def _run() -> None:
+        store = _get_store()
+        imported = 0
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                    await store.add_memory(obj["text"], obj.get("metadata"))
+                    imported += 1
+                except Exception as exc:  # pragma: no cover
+                    rprint(f"[red]Skipping line:[/] {exc}")
+        await _safe_close(store)
+        rprint(f"[green]✓ Imported {imported} memories.[/]")
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:  # pragma: no cover
+    """CLI entry‑point used by `python -m memory_system.cli`."""
+
+    try:
+        app()
+    except Exception as exc:
+        rprint(f"[red]Error:[/] {exc}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
