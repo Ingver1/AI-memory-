@@ -1,29 +1,44 @@
-logging.yaml — Flexible logging configuration for AI‑memory‑
-
------------------------------------------------------------
-
-This file is consumed by logging.config.dictConfig at service startup.
-
-* Two formatters: human‑friendly console and JSON json for Promtail/ELK.
-
-* The JSON handler ships structured logs that Promtail (Loki) easily parses.
-
-* Root level defaults to INFO but may be overridden via LOG_LEVEL.
-
-* Per‑module levels are applied programmatically from Settings.log_level_per_module.
+# logging.yaml — default logging configuration for AI‑memory‑
+# ==========================================================
+# This file declares two stream handlers:
+#   1. console       – human‑readable plaintext output
+#   2. json_console  – structured JSON output compatible with Promtail/Loki
+#
+# The helper `configure_logging()` (see settings.py) inspects the
+# environment variable LOG_JSON.  If it equals "1", the helper swaps
+# the root handler to *json_console* at runtime.  Otherwise the
+# plaintext console handler remains active.
+# ----------------------------------------------------------
 
 version: 1
 
-formatters: console: format: "%(levelname)s | %(name)s | %(message)s" json: (): pythonjsonlogger.jsonlogger.JsonFormatter fmt: "%(asctime)s %(levelname)s %(name)s %(message)s %(pathname)s %(lineno)d"
+formatters:
+  console:
+    format: "%(asctime)s │ %(levelname)-8s │ %(name)s:%(lineno)d │ %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
 
-handlers: default: class: logging.StreamHandler formatter: console stream: ext://sys.stdout promtail: class: logging.StreamHandler formatter: json stream: ext://sys.stdout level: INFO
+  json:
+    (): pythonjsonlogger.jsonlogger.JsonFormatter
+    format: "%(asctime)s %(levelname)s %(name)s %(message)s"
+    datefmt: "%Y-%m-%dT%H:%M:%S"
 
-loggers: uvicorn.error: level: INFO handlers: [default] propagate: no
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: console
+    stream: ext://sys.stdout
 
-uvicorn.access: level: WARNING handlers: [default] propagate: no
+  json_console:
+    class: logging.StreamHandler
+    formatter: json
+    stream: ext://sys.stdout
 
-root: level: INFO  # overridden at runtime by Settings.log_level handlers: [default, promtail]
+loggers:
+  memory_system:
+    level: INFO
+    handlers: [console]
+    propagate: false
 
-NOTE: Per‑module log‑levels are applied in app.startup using
-
-for name, lvl in settings.log_level_per_module.items(): logging.getLogger(name).setLevel(lvl).
+root:
+  level: INFO
+  handlers: [console]
