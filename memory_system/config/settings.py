@@ -1,224 +1,235 @@
 """memory_system.config.settings
 ================================
-Runtime configuration & logging setup for **AI‑memory‑**.
+Runtime configuration for **AI‑memory‑**.
 
-Highlights
-----------
-* **Multi‑format configuration** – values are loaded in the following order (lowest → highest priority):
-  1. ``default.toml`` inside the package (ships sane defaults)
-  2. External ``settings.toml`` (cwd or path via ENV ``AI_MEMORY_SETTINGS``)
-  3. External ``settings.yaml`` / ``.yml`` (same lookup)
-  4. ``.env`` file (dotenv)
-  5. Environment variables
+This module provides a single `Settings` object powered by
+`pydantic‑settings` (v2) that transparently merges configuration from
+**environment variables**, **.env**, **TOML** and **YAML** files. The
+loading order (highest → lowest priority):
 
-* **Strong validation** – ranges via ``PositiveInt``, secrets via ``SecretStr``.
-* **Per‑module log levels** – configurable with ``LOG_LEVEL_PER_MODULE`` env (``module=LEVEL[,module=LEVEL...]``).
-* **One‑shot singleton accessor** – ``get_settings()`` returns a cached instance in the fastest possible way.
+1. Environment variables (12‑factor first)
+2. Values passed via `Settings(...` kwargs)
+3. External YAML (``settings.yaml`` or path in ``AI_MEMORY_SETTINGS``)
+4. External TOML (``settings.toml`` or path in ``AI_MEMORY_SETTINGS``)
+5. ``.env`` file in project root (if present)
+6. File‑secrets directory (Kubernetes‑style)
 
-This file uses **Pydantic‑Settings v2** (`pydantic-settings` package).
+The module also exposes helpers:
+
+* `get_settings()` – cached accessor for DI/tests.
+* `configure_logging()` – sets up logging from ``logging.yaml`` and
+  honours `LOG_LEVEL_PER_MODULE` for fine‑grained control.
+
+Usage
+-----
+```python
+from memory_system.config.settings import get_settings, configure_logging
+
+settings = get_settings()
+configure_logging(settings)
+```
 """
-
 from __future__ import annotations
 
 import json
+import logging
+import logging.config
 import os
-import types
+import sys
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, Iterable, List, Mapping, MutableMapping
+from types import MappingProxyType
+from typing import Any, Dict, Tuple
 
-import tomllib  # Python ≥3.11 (fallback provided below)
-
-import yaml  # PyYAML
-from pydantic import BaseModel, Field, PositiveInt, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, PositiveInt, SecretStr, constr
+from pydantic_settings import (
+    BaseSettings,
+    SettingsConfigDict,
+    PydanticBaseSettingsSourceCallable,
+)
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Optional dependencies: TOML / YAML
+# ---------------------------------------------------------------------------
+try:
+    import tomllib  # Python ≥3.11
+except ModuleNotFoundError:  # pragma: no cover – fallback for 3.10
+    import tomli as tomllib  # type: ignore
+
+try:
+    import yaml  # PyYAML (optional)
+except ModuleNotFoundError:  # pragma: no cover – runtime warning only
+    yaml = None  # type: ignore
+    logging.getLogger(__name__).warning(
+        "PyYAML not installed – YAML config support disabled.")
+
+
+# ---------------------------------------------------------------------------
+# Helpers to load external config files
 # ---------------------------------------------------------------------------
 
-DEFAULT_SETTINGS_FILE = "default.toml"
-EXTERNAL_SETTINGS_FILE_NAMES = ("settings.toml", "settings.yaml", "settings.yml")
-ENV_SETTINGS_PATH_KEY = "AI_MEMORY_SETTINGS"  # path override
-
-LogLevel = str  # for readability; actual validation done later
-
-
-def _toml_loader(path: Path) -> Dict[str, Any]:
+def _load_toml(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {}
-    return tomllib.loads(path.read_text())
+    with path.open("rb") as fp:  # tomllib requires binary mode
+        return tomllib.load(fp)
 
 
-def _yaml_loader(path: Path) -> Dict[str, Any]:
-    if not path.exists():
+def _load_yaml(path: Path) -> Dict[str, Any]:
+    if not yaml or not path.exists():
         return {}
-    return yaml.safe_load(path.read_text()) or {}
+    with path.open("r", encoding="utf-8") as fp:
+        return yaml.safe_load(fp) or {}
 
 
 # ---------------------------------------------------------------------------
 # Settings model
 # ---------------------------------------------------------------------------
 
+_log_level_type = constr(regex=r"^(CRITICAL|ERROR|WARNING|INFO|DEBUG|NOTSET)$", strip_whitespace=True)
 
 class Settings(BaseSettings):
-    """Runtime settings for the whole service."""
+    """Application runtime settings (validated & type‑safe)."""
 
     # ---------------------------------------------------------------------
-    # Core service options
+    # Core service
     # ---------------------------------------------------------------------
+    debug: bool = Field(False, description="Run service in debug mode")
+    host: str = Field("0.0.0.0", description="Bind address")
+    port: PositiveInt = Field(8000, description="Bind port")
 
-    app_name: str = Field("AI‑memory‑", description="Service human‑readable name")
-    host: str = Field("0.0.0.0", description="Host interface to bind")
-    port: PositiveInt = Field(8000, description="TCP port to expose")
-    workers: PositiveInt = Field(1, description="Uvicorn workers count")
-
-    # ---------------------------------------------------------------------
-    # Security & crypto
-    # ---------------------------------------------------------------------
-
-    fernet_key: SecretStr = Field(..., description="Base64‑encoded Fernet key (32 bytes)")
-    allowed_hosts: List[str] = Field(default_factory=list, description="CORS / Host header whitelist")
-
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Logging
-    # ---------------------------------------------------------------------
-
-    log_level: LogLevel = Field("INFO", description="Root log level (DEBUG, INFO…)")
-    log_level_per_module: str | None = Field(
-        None,
-        alias="LOG_LEVEL_PER_MODULE",
-        description="Comma‑separated list: mod.path=LEVEL,another.mod=LEVEL",
+    # ------------------------------------------------------------------
+    log_level: _log_level_type = Field(
+        "INFO", description="Root log level")
+    log_level_per_module: Dict[str, _log_level_type] | None = Field(
+        default=None,
+        description="Per‑module log levels, e.g. '{\n    \"uvicorn.error\": \"WARNING\"\n}'.",
     )
 
-    # ---------------------------------------------------------------------
-    # Background maintenance
-    # ---------------------------------------------------------------------
-
-    compaction_interval_seconds: PositiveInt = Field(3600, description="Blob compaction interval")
-    replication_interval_seconds: PositiveInt = Field(3600, description="Backup replication interval")
-    backup_path: Path = Field(Path("./backups"), description="Local path for replica snapshots")
+    # ------------------------------------------------------------------
+    # Storage paths
+    # ------------------------------------------------------------------
+    sqlite_path: str = Field("memory.db", description="SQLite database file")
+    vector_store_path: str = Field(
+        "memory_vectors.faiss", description="FAISS index path")
 
     # ------------------------------------------------------------------
-    # Pydantic Settings config
+    # Security / auth
     # ------------------------------------------------------------------
+    jwt_secret: SecretStr = Field(..., description="JWT signing secret")
+    encryption_key: SecretStr = Field(..., description="Fernet encryption key")
 
+    # ------------------------------------------------------------------
+    # Background tasks
+    # ------------------------------------------------------------------
+    compaction_interval_sec: PositiveInt = Field(
+        3600, description="Interval for blob compaction job")
+    replication_interval_sec: PositiveInt = Field(
+        3600, description="Interval for replica sync job")
+
+    # ------------------------------------------------------------------
+    # Pydantic settings config
+    # ------------------------------------------------------------------
     model_config = SettingsConfigDict(
+        env_prefix="AI_",  # All env vars start with "AI_"
         env_file=".env",
-        env_prefix="AI_MEMORY_",  # e.g. AI_MEMORY_HOST
+        env_file_encoding="utf-8",
         case_sensitive=False,
     )
 
     # ------------------------------------------------------------------
-    # Validators
-    # ------------------------------------------------------------------
-
-    @field_validator("log_level")
-    @classmethod
-    def _validate_root_level(cls, v: str) -> str:
-        import logging
-
-        if v.upper() not in logging._nameToLevel:
-            raise ValueError(f"Invalid log level: {v}")
-        return v.upper()
-
-    @field_validator("log_level_per_module")
-    @classmethod
-    def _validate_per_module(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        for pair in v.split(","):
-            if "=" not in pair:
-                raise ValueError("LOG_LEVEL_PER_MODULE must be 'module=LEVEL' list")
-        return v
-
-    # ------------------------------------------------------------------
-    # Post‑processing
-    # ------------------------------------------------------------------
-
-    @property
-    def module_log_levels(self) -> Dict[str, str]:
-        if not self.log_level_per_module:
-            return {}
-        result: Dict[str, str] = {}
-        for pair in self.log_level_per_module.split(","):
-            mod, lvl = pair.split("=", 1)
-            result[mod.strip()] = lvl.strip().upper()
-        return result
-
-    # ------------------------------------------------------------------
-    # Customise sources – TOML/YAML support
+    # custom sources (TOML / YAML)
     # ------------------------------------------------------------------
 
     @classmethod
     def settings_customise_sources(
         cls,
-        settings_cls: type["Settings"],
-        init_settings: Callable[[BaseSettings], Dict[str, Any]],
-        env_settings: Callable[[BaseSettings], Dict[str, Any]],
-        file_secret_settings: Callable[[BaseSettings], Dict[str, Any]],
-    ) -> Tuple[Callable[[BaseSettings], Dict[str, Any]], ...]:
-        """Provide extra sources: default.toml, external toml/yaml."""
+        init_settings: PydanticBaseSettingsSourceCallable,
+        env_settings: PydanticBaseSettingsSourceCallable,
+        dotenv_settings: PydanticBaseSettingsSourceCallable,
+        file_secret_settings: PydanticBaseSettingsSourceCallable,
+    ) -> Tuple[PydanticBaseSettingsSourceCallable, ...]:
+        """Define custom loading order with TOML & YAML support."""
 
-        def _load_default(_: BaseSettings) -> Dict[str, Any]:
-            path = Path(__file__).with_suffix(".toml").with_name(DEFAULT_SETTINGS_FILE)
-            return _toml_loader(path)
+        def yaml_settings(_: BaseSettings) -> Dict[str, Any]:
+            env_val = os.getenv("AI_MEMORY_SETTINGS")
+            path = Path(env_val) if env_val else Path("settings.yaml")
+            return _load_yaml(path)
 
-        def _load_external(_: BaseSettings) -> Dict[str, Any]:
-            # Priority: explicit env var → cwd lookup
-            explicit = os.getenv(ENV_SETTINGS_PATH_KEY)
-            if explicit:
-                p = Path(explicit)
-                if p.suffix in {".yaml", ".yml"}:
-                    return _yaml_loader(p)
-                if p.suffix == ".toml":
-                    return _toml_loader(p)
-            # Iterate default names
-            for name in EXTERNAL_SETTINGS_FILE_NAMES:
-                p = Path.cwd() / name
-                if p.suffix == ".toml":
-                    data = _toml_loader(p)
-                else:
-                    data = _yaml_loader(p)
-                if data:
-                    return data
-            return {}
+        def toml_settings(_: BaseSettings) -> Dict[str, Any]:
+            env_val = os.getenv("AI_MEMORY_SETTINGS")
+            path = Path(env_val) if env_val else Path("settings.toml")
+            return _load_toml(path)
 
-        # Order: default.toml < external file < .env / env vars < init kwargs
-        return (_load_default, _load_external, env_settings, init_settings, file_secret_settings)
+        # Precedence: ENV → init → YAML → TOML → .env → secrets
+        return (
+            env_settings,
+            init_settings,
+            yaml_settings,
+            toml_settings,
+            dotenv_settings,
+            file_secret_settings,
+        )
 
 
 # ---------------------------------------------------------------------------
-# Singleton accessor
+# Helpers
 # ---------------------------------------------------------------------------
-
 
 @lru_cache(maxsize=1)
-def get_settings() -> Settings:  # noqa: D401 – short docstring is fine
-    """Return *cached* settings instance (singleton)."""
+def get_settings() -> Settings:  # pragma: no cover
+    """Return a cached `Settings` instance (singleton‑like)."""
+    return Settings()
 
-    return Settings()  # type: ignore[arg-type]
 
+def configure_logging(settings: Settings | None = None) -> None:  # pragma: no cover
+    """Configure logging from ``logging.yaml`` and apply overrides.
 
-# Convenience – configure logging right away when imported as early as possible
-if "LOG_CFG_INITIALISED" not in os.environ:
-    import logging.config
-    from importlib.resources import files
+    If the YAML file is missing, falls back to ``basicConfig``. Call this
+    once at app startup (e.g. in ``main.py``).
+    """
+    settings = settings or get_settings()
+    cfg_path = Path(__file__).resolve().parent.parent / "logging.yaml"
+    if cfg_path.exists() and yaml:
+        try:
+            with cfg_path.open("r", encoding="utf-8") as fp:
+                config_dict = yaml.safe_load(fp)
+            logging.config.dictConfig(config_dict)
+        except Exception:  # pragma: no cover
+            logging.basicConfig(level=settings.log_level)
+            logging.getLogger(__name__).exception(
+                "Failed to load logging.yaml – falling back to basicConfig")
+    else:
+        logging.basicConfig(level=settings.log_level)
 
-    LOG_CFG_INITIALISED = "LOG_CFG_INITIALISED"
-
-    cfg_path = files(__package__).joinpath("../../logging.yaml").resolve()
-    if cfg_path.exists():
-        import yaml
-
-        with open(cfg_path, "r") as fh:
-            config_dict = yaml.safe_load(fh)
-        logging.config.dictConfig(config_dict)
-
-        # Apply per‑module overrides
-        s = get_settings()
-        for mod, lvl in s.module_log_levels.items():
+    # fine‑grained overrides
+    if settings.log_level_per_module:
+        for mod, lvl in settings.log_level_per_module.items():
             logging.getLogger(mod).setLevel(lvl)
 
-        os.environ[LOG_CFG_INITIALISED] = "1"
-        
+
+# ---------------------------------------------------------------------------
+# CLI helper (optional)
+# ---------------------------------------------------------------------------
+
+def _cli_preview() -> None:  # pragma: no cover – quick debug helper
+    """Print current settings as JSON (for debugging)."""
+
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Print merged settings")
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
+    args = parser.parse_args()
+
+    s = get_settings()
+    if args.json:
+        print(json.dumps(s.model_dump(), indent=2, default=str))
+    else:
+        for k, v in s.model_dump().items():
+            print(f"{k:30} : {v}")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    _cli_preview()
