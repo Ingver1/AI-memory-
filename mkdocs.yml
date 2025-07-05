@@ -1,9 +1,0 @@
-yaml
-   site_name: Unified Memory System
-   site_description: Enterprise-grade memory system
-   theme:
-     name: material
-   nav:
-     - Home: index.md
-   plugins:
-     - search
