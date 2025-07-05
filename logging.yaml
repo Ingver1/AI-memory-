@@ -1,63 +1,29 @@
-logging.yaml — Unified Memory System
+logging.yaml — Flexible logging configuration for AI‑memory‑
 
+-----------------------------------------------------------
 
+This file is consumed by logging.config.dictConfig at service startup.
 
-Load from Python with:
+* Two formatters: human‑friendly console and JSON json for Promtail/ELK.
 
-import yaml, logging.config, pathlib, os
+* The JSON handler ships structured logs that Promtail (Loki) easily parses.
 
-cfg = yaml.safe_load(pathlib.Path('logging.yaml').read_text())
+* Root level defaults to INFO but may be overridden via LOG_LEVEL.
 
-logging.config.dictConfig(cfg)
-
-
-
-The config respects ENV vars:
-
-LOG_LEVEL   – root level (default INFO)
-
-LOG_JSON    – "1" to enable JSON output for console
-
-
+* Per‑module levels are applied programmatically from Settings.log_level_per_module.
 
 version: 1
 
----------------------------------------------------------------------------
+formatters: console: format: "%(levelname)s | %(name)s | %(message)s" json: (): pythonjsonlogger.jsonlogger.JsonFormatter fmt: "%(asctime)s %(levelname)s %(name)s %(message)s %(pathname)s %(lineno)d"
 
-Formatters
+handlers: default: class: logging.StreamHandler formatter: console stream: ext://sys.stdout promtail: class: logging.StreamHandler formatter: json stream: ext://sys.stdout level: INFO
 
----------------------------------------------------------------------------
+loggers: uvicorn.error: level: INFO handlers: [default] propagate: no
 
-formatters: console: (): "logging.Formatter" format: "%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s" datefmt: "%Y-%m-%d %H:%M:%S"
+uvicorn.access: level: WARNING handlers: [default] propagate: no
 
-file: (): "logging.Formatter" format: "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d | %(message)s" datefmt: "%Y-%m-%d %H:%M:%S"
+root: level: INFO  # overridden at runtime by Settings.log_level handlers: [default, promtail]
 
-json: (): "pythonjsonlogger.jsonlogger.JsonFormatter" format: "%(asctime)s %(levelname)s %(name)s %(message)s" %(pattern)s
+NOTE: Per‑module log‑levels are applied in app.startup using
 
----------------------------------------------------------------------------
-
-Handlers
-
----------------------------------------------------------------------------
-
-handlers: console: class: logging.StreamHandler level: DEBUG formatter: console stream: ext://sys.stdout
-
-json_console: class: logging.StreamHandler level: DEBUG formatter: json stream: ext://sys.stdout
-
-file: class: logging.handlers.RotatingFileHandler level: DEBUG formatter: file filename: ums.log maxBytes: 10485760   # 10MB backupCount: 5
-
----------------------------------------------------------------------------
-
-Loggers
-
----------------------------------------------------------------------------
-
-loggers: memory_system: level: INFO handlers: [console] propagate: no
-
----------------------------------------------------------------------------
-
-Root logger
-
----------------------------------------------------------------------------
-
-root: level: "${LOG_LEVEL:-INFO}" handlers: - "${LOG_JSON:-0}"  # evaluated by loader wrapper, not by logging itself
+for name, lvl in settings.log_level_per_module.items(): logging.getLogger(name).setLevel(lvl).
