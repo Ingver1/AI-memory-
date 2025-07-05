@@ -1,20 +1,19 @@
 """memory_system.utils.security
-
+================================
 High‑level cryptographic helpers for AI‑memory‑.
 
 Key features
-
-CryptoContext – injectable object encapsulating symmetric encryption (Fernet), signing and verification with automatic key rotation.
-
-Pluggable KMS backend – default local JSON keyring + optional AWS KMS backend (lazy import, safe to mock in unit‑tests).
-
-Audit trail – every call to encrypt/sign/verify/decrypt is logged to logging.getLogger("ai_memory.security.audit") with correlation IDs.
-
-100 % type‑hinted, ready for dependency injection via FastAPI.
-
+------------
+* **CryptoContext** – injectable object encapsulating symmetric encryption (Fernet),
+  signing and verification with automatic *key rotation*.
+* **Pluggable KMS backend** – default local JSON keyring + optional AWS KMS backend
+  (lazy import, safe to mock in unit‑tests).
+* **Audit trail** – every call to *encrypt/sign/verify/decrypt* is logged to
+  ``logging.getLogger("ai_memory.security.audit")`` with correlation IDs.
+* 100 % type‑hinted, ready for dependency injection via FastAPI.
 
 Example
-
+~~~~~~~
 >>> ctx = CryptoContext.from_env()
 >>> token = ctx.encrypt(b"secret")
 >>> data  = ctx.decrypt(token)
@@ -278,4 +277,4 @@ async def start_maintenance(ctx: CryptoContext, interval_hours: PositiveInt = Po
             await ctx.maybe_rotate_keys()
             await asyncio.sleep(interval_hours * 3600)
 
-    asyncio.create_task(_loop(), name="crypto_key_maintenance")
+    asyncio.create_task(_loop(), name="crypto_key_maintenance")    
