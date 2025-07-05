@@ -44,12 +44,9 @@ from memory_system.utils.exceptions import (
     log_exception,
 )
 from memory_system.utils.metrics import (
-    prometheus_counter,
     get_prometheus_metrics,
     get_metrics_content_type,
     measure_time,
-    measure_time_async,
-    update_system_metrics,
 )
 
 
@@ -254,7 +251,7 @@ class TestPIIPatterns:
             "255.255.255.255",
         ]
         
-        for ip in valid_ips:
+        for _ in valid_ips:
             assert pattern.search(ip) is not None
         
         # Invalid IP addresses
