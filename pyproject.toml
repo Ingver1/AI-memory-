@@ -1,5 +1,8 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = [
+  "setuptools>=68",
+  "wheel",
+]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -12,7 +15,13 @@ license         = { text = "Apache-2.0" }
 authors         = [
   { name = "Ingver", email = "ingver@example.com" },
 ]
-keywords        = ["memory", "FAISS", "vector", "FastAPI", "SQLite"]
+keywords = [
+  "memory", "FAISS", "vector", "FastAPI", "SQLite",
+]
+
+# -------------------------------
+# Runtime dependencies
+# -------------------------------
 
 dependencies = [
   # Web / API
@@ -37,9 +46,13 @@ dependencies = [
   "opentelemetry-sdk>=1.23",
   "opentelemetry-instrumentation-fastapi>=0.45",
 
-  # HTTP client (CLI / tests)
+  # HTTP client (used by CLI & tests)
   "httpx>=0.27",
 ]
+
+# -------------------------------
+# Optional feature groups
+# -------------------------------
 
 [project.optional-dependencies]
 cli = [
@@ -53,8 +66,9 @@ dev = [
   "pytest>=8.2",
   "pytest-asyncio>=0.23",
   "coverage>=7.5",
+  "bandit>=1.7",
 
-  # Config file parsers for legacy interpreters
+  # Config parsers for Python <3.11
   "tomli>=2.0; python_version<'3.11'",
   "pyyaml>=6.0",
 ]
@@ -62,18 +76,26 @@ dev = [
 [project.scripts]
 ai-mem = "memory_system.cli:app"
 
+# -------------------------------
+# Setuptools package discovery
+# -------------------------------
+
 [tool.setuptools.packages.find]
 where   = ["."]
 exclude = ["tests*", "examples*"]
 
+# -------------------------------
+# Linting / typing configuration
+# -------------------------------
+
 [tool.ruff]
 target-version = "py311"
 line-length    = 100
-select         = ["E", "F", "I", "UP", "B", "C90"]   # style, bugs, isort, upgrades, best-practices
-ignore         = ["E501"]                            # handled by black
+select         = ["E", "F", "I", "UP", "B", "C90"]
+ignore         = ["E501"]   # handled by black or IDE
 
 [tool.mypy]
-python_version        = "3.11"
-strict                = true
+python_version         = "3.11"
+strict                 = true
 ignore_missing_imports = true
-show_error_codes      = true
+show_error_codes       = true
