@@ -221,3 +221,5 @@ async def lifespan_context(app: "FastAPI") -> AsyncIterator[None]:  # pragma: no
 
 def get_memory_store(request: "Request") -> SQLiteMemoryStore:  # pragma: no cover
     return request.app.state.memory_store
+    
+from memory_system.core.enhanced_store import EnhancedMemoryStore, HealthComponent  # Ensure EnhancedMemoryStore & HealthComponent are accessible via core.store
