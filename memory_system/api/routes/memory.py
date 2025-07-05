@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, UTC, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
 from memory_system.api.schemas import (
@@ -90,7 +90,7 @@ async def create_memory(
              detail="Failed to generate query embedding",
          ) from e
 
-    except Exception as e:                                          # B904
+    except Exception as e:
          log_error("Failed to search memories: %s", e)
          raise HTTPException(
              status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -108,7 +108,7 @@ async def get_memory(
     try:
         # In a real implementation, this would query the store
         # For now, return a mock memory
-        from datetime import datetime, timezone
+        from datetime import datetime, UTC
         
         memory = MemoryRead(
             id=memory_id,
@@ -116,8 +116,8 @@ async def get_memory(
             text=f"Sample memory content for {memory_id}",
             role="assistant",
             tags=["sample"],
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
         )
         
         return memory
@@ -155,7 +155,7 @@ async def update_memory(
             embedding = await embedding_service.encode(memory_update.text)
         
         # In a real implementation, this would update the store
-        from datetime import datetime, timezone
+        from datetime import datetime, UTC
         
         memory = MemoryRead(
             id=memory_id,
@@ -163,8 +163,8 @@ async def update_memory(
             text=memory_update.text or f"Updated memory content for {memory_id}",
             role=memory_update.role or "assistant",
             tags=memory_update.tags or ["updated"],
-            created_at=datetime.now(timezone.utc) - timedelta(hours=1),
-            updated_at=datetime.now(timezone.utc),
+            created_at=datetime.now(UTC) - timedelta(hours=1),
+            updated_at=datetime.now(UTC),
         )
         
         log.info(f"Updated memory {memory_id} for user {memory.user_id}")
@@ -238,7 +238,7 @@ async def search_memories(
         
         # In a real implementation, this would search the vector index
         # For now, return mock results
-        from datetime import datetime, timezone
+        from datetime import datetime, UTC
         
         results = []
         for i in range(min(query.top_k, 3)):  # Mock 3 results
@@ -250,8 +250,8 @@ async def search_memories(
                 text=f"Mock search result {i+1} for query: {query.query}",
                 role="assistant",
                 tags=["search", "result"],
-                created_at=datetime.now(timezone.utc) - timedelta(hours=i),
-                updated_at=datetime.now(timezone.utc) - timedelta(hours=i),
+                created_at=datetime.now(UTC) - timedelta(hours=i),
+                updated_at=datetime.now(UTC) - timedelta(hours=i),
                 score=score,
                 embedding=query_embedding.flatten().tolist() if query.include_embeddings else None,
             )
@@ -276,32 +276,27 @@ async def search_memories(
 
 @router.get("/", response_model=list[MemoryRead])
 async def list_memories(
+    request: Request,
     user_id: str | None = Query(None, description="User ID filter"),
 ) -> list[MemoryRead]:
-    """Return all memories, optionally filtered by user_id."""
+    """Return all memories, optionally filtered by *user_id*."""
     store: EnhancedMemoryStore = request.app.state.store  # type: ignore[attr-defined]
     raw_rows = await store.list_memories(user_id=user_id)
     return [MemoryRead.model_validate(r) for r in raw_rows]
     
     try:
         # In a real implementation, this would query the store with filters
-        from datetime import datetime, timezone
+        from datetime import datetime, UTC
         
-        memories = []
-        for i in range(min(limit, 10)):  # Mock up to 10 memories
-            memory = MemoryRead(
-                id=f"mem_{offset + i}",
-                user_id=user_id or "anonymous",
-                text=f"Memory {offset + i} content",
-                role=role or "assistant",
-                tags=tags or ["sample"],
-                created_at=datetime.now(timezone.utc) - timedelta(hours=i),
-                updated_at=datetime.now(timezone.utc) - timedelta(hours=i),
-            )
-            memories.append(memory)
-        
-        log.info(f"Listed {len(memories)} memories with filters: user_id={user_id}, role={role}, tags={tags}")
-        return memories
+        result = [MemoryRead.model_validate(r) for r in raw_rows]
+    log.info(
+        "Listed %s memories with filters: user_id=%s, role=%s, tags=%s",
+        len(result),
+        user_id,
+        role,
+        tags,
+    )
+    return result
         
     except Exception as e:
         log.error(f"Failed to list memories: {e}")
@@ -318,7 +313,7 @@ async def list_memories(
 async def create_memories_batch(
     memories: List[MemoryCreate],
     store: EnhancedMemoryStore = Depends(get_memory_store),
-    embedding_service: EnhancedEmbeddingService = Depends(get_embedding_service),
+    embedding_service: EnhancedEmbeddingService = Dends(get_embedding_service),
 ) -> List[MemoryRead]:
     """Create multiple memories in a single batch operation."""
     try:
@@ -330,7 +325,7 @@ async def create_memories_batch(
         embeddings = await embedding_service.encode(texts)
         
         # In a real implementation, this would batch insert into the store
-        from datetime import datetime, timezone
+        from datetime import datetime, UTC
         
         created_memories = []
         for i, memory_data in enumerate(memories):
@@ -342,8 +337,8 @@ async def create_memories_batch(
                 text=memory_data.text,
                 role=memory_data.role,
                 tags=memory_data.tags,
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
             )
             created_memories.append(memory)
         
