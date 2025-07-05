@@ -92,6 +92,12 @@ class Settings(BaseSettings):
         ..., description="JWT signing / verification key"
     )
 
+    # ----------------------------------------------------------- Version 🏷️ #
+    version: str = Field(
+        "0.8.0a0",  # PEP-440
+        description="Application version",
+    )
+
     # ----------------------------------------------------------- Logging 🪵 #
     log_level: str = Field("INFO", description="Root log level")
     log_level_per_module: str = Field(
