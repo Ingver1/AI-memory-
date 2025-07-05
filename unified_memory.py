@@ -22,7 +22,8 @@ import asyncio
 import datetime as _dt
 import logging
 import uuid
-from typing import Any, MutableMapping, Sequence
+from typing import Any
+from collections.abc import MutableMapping, Sequence
 
 from .core.store import (
     Memory,
