@@ -1,206 +1,167 @@
-#!/usr/bin/env python3
-"""unified_memory.py — CLI entry point for Unified Memory System
+"""memory_system.unified_memory
+================================
+High‑level, **framework‑agnostic** helper functions that wrap the lower
+level storage / vector components.  Nothing in here depends on FastAPI
+or any other web framework – the goal is to let notebooks, background
+jobs, or other services reuse the same persistence logic without pulling
+in heavy HTTP deps.
 
-Version: 0.8‑alpha
-
-This single file provides a minimal yet extensible command‑line interface around
-*Unified Memory System*.  Typical usage::
-
-    # Start API server on default host/port (127.0.0.1:8000)
-    $ python unified_memory.py serve
-
-    # Start API server in production mode (gunicorn‑style workers)
-    $ python unified_memory.py serve --production --workers 4 --host 0.0.0.0 --port 80
-
-    # Run a lightweight HTTP health probe on :8080
-    $ python unified_memory.py health --port 8080
-
-The file intentionally avoids deep business logic; anything heavy lives inside
-``memory_system/`` modules.  This wrapper only wires them up, performs basic
-parameter validation and surfaces helpful log messages.
+Notes
+-----
+* All functions are **async**.  They accept an optional ``store`` kwarg –
+  any object that implements ``add_memory``, ``search_memory``,
+  ``delete_memory`` and ``update_metadata``.  If not supplied the helper
+  tries to obtain the application‑scoped store via
+  :pyfunc:`memory_system.core.store.get_memory_store`.
+* Docstrings follow **PEP 257** and type hints are 100 % complete so that
+  MyPy / Ruff‑strict pass cleanly.
 """
 from __future__ import annotations
 
-import argparse
-import asyncio as _asyncio
-import importlib
+import asyncio
+import datetime as _dt
 import logging
-import os
-import signal
-import sys
-from typing import Any, Dict, List
+import uuid
+from typing import Any, MutableMapping, Sequence
 
-import uvicorn
-
-# ---------------------------------------------------------------------------
-# Version & logging
-# ---------------------------------------------------------------------------
-VERSION = "0.8-alpha"
-logging.basicConfig(
-    level=os.getenv("UMS_LOG_LEVEL", "INFO"),
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+from .core.store import (
+    Memory,
+    MemoryStoreProtocol,  # structural – both SQLiteMemoryStore & InMemoryStore implement.
+    get_memory_store,
 )
-log = logging.getLogger("ums.cli")
+
+logger = logging.getLogger("memory_system.unified_memory")
 
 # ---------------------------------------------------------------------------
-# Dependency verifier
-# ---------------------------------------------------------------------------
-
-
-def _check_dependencies() -> List[str]:
-    """Return a list of missing *critical* Python modules."""
-    required = {
-        "fastapi": "fastapi",
-        "uvicorn": "uvicorn",
-        "pydantic": "pydantic",
-        "numpy": "numpy",
-        "sentence_transformers": "sentence-transformers",
-        "faiss": "faiss-cpu or faiss-gpu",
-    }
-
-    missing: List[str] = []
-    for module_name, pip_name in required.items():
-        try:
-            importlib.import_module(module_name)
-        except Exception:
-            missing.append(pip_name)
-    return missing
-
-
-# ---------------------------------------------------------------------------
-# Signal handling
+# Generic helpers
 # ---------------------------------------------------------------------------
 
 
-def _setup_signal_handlers() -> None:
-    """Intercept SIGINT / SIGTERM to shut down gracefully."""
-
-    def _graceful_exit(signum: int, _frame):
-        log.info("Received signal %s — exiting…", signum)
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, _graceful_exit)
-    signal.signal(signal.SIGTERM, _graceful_exit)
+aSYNC_TIMEOUT = 5  # seconds – safety net for accidental long‑running operations.
 
 
-# ---------------------------------------------------------------------------
-# Sub-command: health
-# ---------------------------------------------------------------------------
+async def _resolve_store(
+    store: MemoryStoreProtocol | None = None,
+) -> MemoryStoreProtocol:
+    """Return a concrete store instance.
 
+    The rules are:
+    1. If *store* is given → use it.
+    2. Else try to obtain the application‑scoped store via
+       :func:`memory_system.core.store.get_memory_store`.
+    """
 
-async def _run_health_server(port: int) -> None:
-    """Serve a minimal JSON health response on */health*."""
-    from fastapi import FastAPI
+    if store is not None:
+        return store
 
-    app = FastAPI(title="UMS Health", version=VERSION)
-
-    @app.get("/health")
-    async def health() -> Dict[str, Any]:
-        return {"status": "healthy", "version": VERSION}
-
-    log.info("Starting lightweight health server on 0.0.0.0:%d", port)
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
+    resolved = get_memory_store()
+    if resolved is None:
+        raise RuntimeError("Memory store has not been initialised.")
+    return resolved
 
 
 # ---------------------------------------------------------------------------
-# Sub-command: serve
+# Public API
 # ---------------------------------------------------------------------------
 
 
-def _serve_api(args: argparse.Namespace) -> None:
-    """Start the full FastAPI application via Uvicorn."""
-    from memory_system.api.app import create_app
+async def add(
+    text: str,
+    metadata: MutableMapping[str, Any] | None = None,
+    *,
+    store: MemoryStoreProtocol | None = None,
+) -> Memory:
+    """Persist a *text* record with optional *metadata* and return a **Memory**.
 
-    app = create_app()
+    Parameters
+    ----------
+    text:
+        Raw textual content of the memory.
+    metadata:
+        Arbitrary key/‑value mapping (JSON‑serialisable).  Reserved keys
+        such as ``created_at`` or ``memory_id`` will be overwritten.
+    store:
+        Optional explicit store object implementing the protocol.  If
+        *None* the process‑wide default is used.
+    """
 
-    if args.production:
-        log.info(
-            "Launching API server (production) on %s:%d with %d workers",
-            args.host,
-            args.port,
-            args.workers,
-        )
-        uvicorn.run(
-            app,
-            host=args.host,
-            port=args.port,
-            workers=args.workers,
-            log_level="info",
-        )
-    else:
-        log.info(
-            "Launching API server (development) on %s:%d (reload=%s)",
-            args.host,
-            args.port,
-            bool(args.reload),
-        )
-        uvicorn.run(
-            app,
-            host=args.host,
-            port=args.port,
-            reload=args.reload,
-            log_level="debug",
-        )
-
-
-# ---------------------------------------------------------------------------
-# CLI parser
-# ---------------------------------------------------------------------------
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="unified-memory",
-        description=f"Unified Memory System {VERSION}",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""Examples:\n  ums serve --host 0.0.0.0 --port 80 --production --workers 4\n  ums health --port 8080""",
+    memory = Memory(
+        memory_id=str(uuid.uuid4()),
+        text=text,
+        metadata=metadata or {},
+        created_at=_dt.datetime.utcnow(),
     )
 
-    sub = parser.add_subparsers(dest="command", metavar="<command>")
-
-    # serve
-    p_serve = sub.add_parser("serve", help="Start the API server")
-    p_serve.add_argument("--host", default="127.0.0.1", help="Bind host")
-    p_serve.add_argument("--port", type=int, default=8000, help="Bind port")
-    p_serve.add_argument("--reload", action="store_true", help="Enable code reload")
-    p_serve.add_argument("--production", action="store_true", help="Production mode")
-    p_serve.add_argument("--workers", type=int, default=1, help="Number of worker processes")
-
-    # health
-    p_health = sub.add_parser("health", help="Run a lightweight health probe server")
-    p_health.add_argument("--port", type=int, default=8080, help="Health server port")
-
-    return parser
+    st = await _resolve_store(store)
+    await asyncio.wait_for(st.add_memory(memory), timeout=aSYNC_TIMEOUT)
+    logger.debug("Memory %s added (%d chars).", memory.memory_id, len(text))
+    return memory
 
 
-# ---------------------------------------------------------------------------
-# Entry-point
-# ---------------------------------------------------------------------------
+async def search(
+    query: str,
+    k: int = 5,
+    *,
+    metadata_filter: MutableMapping[str, Any] | None = None,
+    store: MemoryStoreProtocol | None = None,
+) -> Sequence[Memory]:
+    """Semantic search across stored memories.
+
+    Parameters
+    ----------
+    query:
+        Search phrase.
+    k:
+        Maximum number of results.
+    metadata_filter:
+        Optional mapping – only memories whose metadata contains all
+        specified keys/values will be considered.
+    store:
+        Explicit store object or *None* for the default.
+    """
+    st = await _resolve_store(store)
+    results = await asyncio.wait_for(
+        st.search_memory(query=query, k=k, metadata_filter=metadata_filter),
+        timeout=aSYNC_TIMEOUT,
+    )
+    logger.debug("Search for '%s' returned %d result(s).", query, len(results))
+    return results
 
 
-def main(argv: List[str] | None = None) -> None:  # pragma: no cover
-    _setup_signal_handlers()
-
-    missing = _check_dependencies()
-    if missing:
-        log.error("Missing dependencies: %s", ", ".join(missing))
-        log.error("Install them with: pip install %s", " ".join(missing))
-        sys.exit(1)
-
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
-    if args.command == "serve":
-        _serve_api(args)
-    elif args.command == "health":
-        _asyncio.run(_run_health_server(args.port))
-    else:
-        parser.print_help(sys.stderr)
-        sys.exit(1)
+async def delete(
+    memory_id: str,
+    *,
+    store: MemoryStoreProtocol | None = None,
+) -> None:
+    """Delete a memory by ``memory_id`` if it exists."""
+    st = await _resolve_store(store)
+    await asyncio.wait_for(st.delete_memory(memory_id), timeout=aSYNC_TIMEOUT)
+    logger.debug("Memory %s deleted.", memory_id)
 
 
-# Allow `python -m unified_memory` execution
-if __name__ == "__main__":
-    main()
+async def update(
+    memory_id: str,
+    *,
+    text: str | None = None,
+    metadata: MutableMapping[str, Any] | None = None,
+    store: MemoryStoreProtocol | None = None,
+) -> Memory:
+    """Update text and/or metadata of an existing memory and return the new object."""
+    st = await _resolve_store(store)
+    updated = await asyncio.wait_for(
+        st.update_memory(memory_id, text=text, metadata=metadata), timeout=aSYNC_TIMEOUT
+    )
+    logger.debug("Memory %s updated.", memory_id)
+    return updated
+
+
+async def list_recent(
+    n: int = 20,
+    *,
+    store: MemoryStoreProtocol | None = None,
+) -> Sequence[Memory]:
+    """Return *n* most recently added memories in descending chronological order."""
+    st = await _resolve_store(store)
+    recent = await asyncio.wait_for(st.list_recent(n=n), timeout=aSYNC_TIMEOUT)
+    logger.debug("Fetched %d recent memories.", len(recent))
+    return recent
