@@ -5,7 +5,7 @@ from __future__ import annotations
 
 __all__ = [
     "EnhancedMemoryStore",
-    "EnhancedEmbeddingService", 
+    "EmbeddingService", 
     "FaissHNSWIndex",
     "VectorStore",
     "Memory",
@@ -16,9 +16,9 @@ def __getattr__(name: str):
     if name == "EnhancedMemoryStore":
         from memory_system.core.store import EnhancedMemoryStore
         return EnhancedMemoryStore
-    elif name == "EnhancedEmbeddingService":
+    elif name == "EmbeddingService":
         from memory_system.core.embedding import EnhancedEmbeddingService
-        return EnhancedEmbeddingService
+        return EmbeddingService
     elif name == "FaissHNSWIndex":
         from memory_system.core.index import FaissHNSWIndex
         return FaissHNSWIndex
