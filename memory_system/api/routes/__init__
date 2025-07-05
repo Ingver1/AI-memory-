@@ -1,8 +1,6 @@
-# memory_system/api/routes/__init__.py
-"""API routes package."""
+"""Sub-routers for AI-memory- API.
 
-from .health import router as health_router
-from .memory import router as memory_router
-from .admin import router as admin_router
-
-__all__ = ["health_router", "memory_router", "admin_router"]  # ADD memory_router
+The file is intentionally empty: its mere presence makes
+`memory_system.api.routes` a *regular* (non-namespace) package, so
+`from memory_system.api.routes import ...` works on every interpreter.
+See §6 «Modules» of the Python docs.  """
