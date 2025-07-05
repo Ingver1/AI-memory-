@@ -1,33 +1,61 @@
-FROM python:3.11-slim
+# syntax=docker/dockerfile:1.6
+# -------------------------------------------------------------
+# Multi‑stage Dockerfile for AI‑memory‑ (image < 150 MB)
+# 1. Build stage   – python:3.11‑bookworm, compile wheels & install deps
+# 2. Runtime stage – python:3.11‑slim‑bookworm, copy wheels only
+# -------------------------------------------------------------
 
-# Set environment variables for Python
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
+############################ 1️⃣ build‑stage ############################
+FROM python:3.11-bookworm AS build
 
-# Set working directory
+# Install system build deps only in builder image
+RUN apt-get update -qq \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential gcc \
+    libffi-dev libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy dependency manifests first (leverages Docker layer‑cache)
+COPY requirements*.txt ./
+# Enable BuildKit pip cache layer (~ /root/.cache/pip) to speed up rebuilds
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip \
+ && pip wheel --wheel-dir /wheels -r requirements.txt
+
+# Copy project source after deps (changes here bust cache only when src changes)
+COPY . /build/src
+
+# Install project into a temp location
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir --prefix=/install /build/src
+
+############################ 2️⃣ runtime‑stage ###########################
+FROM python:3.11-slim-bookworm AS runtime
+LABEL maintainer="Ingver1 <github.com/Ingver1>" \
+      org.opencontainers.image.source="https://github.com/Ingver1/AI-memory-" \
+      org.opencontainers.image.description="Self‑hosted AI memory service (FastAPI + FAISS)"
+
+# Workdir inside container
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y gcc g++ && rm -rf /var/lib/apt/lists/*
+# Copy Python env from build stage (only site‑packages & entrypoints)
+COPY --from=build /install /usr/local
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy runtime assets (static files, logging config, etc.)
+COPY --chown=root:root logging.yaml ./
+COPY --chown=root:root memory_system ./memory_system
 
-# Copy application code
-COPY . .
-
-# Create a non-root user for running the app
-RUN useradd --create-home --shell /bin/bash appuser && chown -R appuser:appuser /app
+# Non‑root user for security (optional)
+RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Expose application port
-EXPOSE 8000
+ENV PYTHONUNBUFFERED=1 \
+    PORT=8000 \
+    AI_MEMORY_SETTINGS=/app/settings.toml
 
-# Health check for container
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+EXPOSE $PORT
 
-# Start the application using Uvicorn
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]tem", "--cov-report=term-missing"]
+# Default command (can be overridden by docker‑compose / k8s)
+ENTRYPOINT ["uvicorn", "memory_system.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
