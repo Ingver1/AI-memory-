@@ -1,181 +1,138 @@
-"""cli.py — Command‑line interface for **AI‑memory‑**
-===================================================
+"""memory_system.cli
 
-This module exposes a small **Typer** application that lets you perform
-basic operations against the running memory store from the shell.  It is
-kept separate from the core library so heavy CLI‑only dependencies do
-not pollute production runtimes.
+Command‑line interface for AI‑memory‑.
 
-Installation
-------------
-The extra "cli" introduces the ``typer`` and ``rich`` tread‑offs::
+This CLI is optional – it lives in the cli extras group so that a minimal production install is not forced to pull heavy interactive libraries.  When the extras are not installed we gracefully degrade to plain‑text output. """ from future import annotations
 
-    pip install "ai-memory[cli]"
+import asyncio import json import os import sys from pathlib import Path from typing import Any, Optional
 
-Usage examples
---------------
-::
+import httpx import typer
 
-    # Add a memory snippet
-    ai-memory add "Sky above Port‑Arthur was the color of television." \
-                 --metadata '{"source": "book", "title": "Neuromancer"}'
+---------------------------------------------------------------------------
 
-    # Search for a fragment
-    ai-memory search "television" --limit 3
+Optional rich import (colourful tables, JSON pretty‑print)
 
-    # Delete a memory by its UUID
-    ai-memory delete 1e638967-0f94-47ad-8f98-e9a3b61b62d3
+---------------------------------------------------------------------------
 
-    # Bulk‑import from a NDJSON file
-    ai-memory import-json ./snippets.ndjson
+try: from rich import print as rprint from rich.panel import Panel from rich.table import Table except ModuleNotFoundError:  # "rich" not installed
 
-Notes
------
-* All commands run **asynchronously** using ``asyncio.run``.
-* The SQLite database location and pool size are read from
-  :pymod:`memory_system.config.settings` – override via environment
-  variables or config files.
-* Errors are rendered with coloured tracebacks using *rich*.
-"""
-from __future__ import annotations
+def rprint(*args: Any, **kwargs: Any) -> None:  # type: ignore[unused‑private‑method]
+    """Fallback to plain ``print`` when *rich* is unavailable."""
 
-import asyncio
-import json
-import sys
-from pathlib import Path
-from typing import Optional
+    if not os.environ.get("AI_MEM_RICH_WARNING_SHOWN"):
+        print("[hint] For coloured output install:  pip install ai-memory[cli]", file=sys.stderr)
+        os.environ["AI_MEM_RICH_WARNING_SHOWN"] = "1"
+    print(*args, **kwargs)
 
-import typer
-from rich import print as rprint
-from rich.traceback import install as rich_tb_install
+class Panel:  # noqa: D101 – shim
+    def __init__(self, renderable: str, **_: Any) -> None:  # noqa: D401
+        self.renderable = renderable
 
-from memory_system.config.settings import get_settings
-from memory_system.core.store import Memory, SQLiteMemoryStore
+    def __str__(self) -> str:  # noqa: D401
+        return self.renderable
 
-# pretty tracebacks for CLI users
-rich_tb_install(show_locals=False)
+class Table:  # noqa: D101 – shim
+    def __init__(self, title: str | None = None, **_: Any) -> None:  # noqa: D401
+        self.rows: list[list[str]] = []
+        self.title = title or ""
 
-# ---------------------------------------------------------------------------
-# Typer application
-# ---------------------------------------------------------------------------
-app = typer.Typer(add_completion=False, rich_markup_mode="rich", no_args_is_help=True)
+    def add_column(self, *_: Any, **__: Any) -> None:  # noqa: D401
+        return None
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+    def add_row(self, *values: str) -> None:  # noqa: D401
+        self.rows.append(list(values))
 
-def _get_store() -> SQLiteMemoryStore:
-    """Create a temporary store instance based on current Settings."""
+    def __str__(self) -> str:  # noqa: D401 – just plain table
+        buf = [self.title] if self.title else []
+        for row in self.rows:
+            buf.append(" | ".join(row))
+        return "\n".join(buf)
 
-    settings = get_settings()
-    return SQLiteMemoryStore(
-        dsn=settings.sqlite_dsn,
-        pool_size=settings.sqlite_pool_size,
-    )
+---------------------------------------------------------------------------
 
+Typer application
 
-async def _safe_close(store: SQLiteMemoryStore) -> None:
-    """Ensure the store is closed even if an exception bubbles up."""
+---------------------------------------------------------------------------
 
-    try:
-        await store.close()
-    except Exception:  # pragma: no cover – log & swallow in CLI context
-        rprint("[yellow]Warning:[/] failed to close store cleanly.")
+app = typer.Typer(name="ai-mem", help="Interact with an AI-memory- server via REST API.")
 
+API_URL_ENV = "AI_MEM_API_URL" DEFAULT_API = "http://localhost:8000"
 
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
+---------------------------------------------------------------------------
 
+Helper utilities
 
-@app.command(help="Add a single memory snippet to the store.")
-def add(
-    text: str = typer.Argument(..., help="Textual content of the memory"),
-    metadata: Optional[str] = typer.Option(
-        None,
-        "--metadata",
-        "-m",
-        help="JSON string with arbitrary key/values.",
-    ),
-):
-    """Insert new :class:`~memory_system.core.store.Memory`."""
+---------------------------------------------------------------------------
 
-    async def _run() -> None:
-        store = _get_store()
-        data = json.loads(metadata) if metadata else None
-        await store.add_memory(text, data)
-        await _safe_close(store)
-        rprint("[green]✓ Added memory.")
+async def _client(base_url: str) -> httpx.AsyncClient:  # noqa: D401 return httpx.AsyncClient(base_url=base_url, timeout=30.0)
 
-    asyncio.run(_run())
+def _metadata_option(ctx: typer.Context, param: typer.CallbackParam, value: str | None) -> Optional[dict[str, Any]]:  # noqa: D401 if not value: return None try: return json.loads(value) except json.JSONDecodeError as exc:  # pragma: no cover – obvious error path raise typer.BadParameter(f"Invalid JSON: {exc}") from exc
 
+---------------------------------------------------------------------------
 
-@app.command(help="Perform semantic search across stored memories.")
-def search(
-    query: str = typer.Argument(..., help="Search query text"),
-    limit: int = typer.Option(5, "--limit", "-l", help="Max hits to return"),
-):
-    """Return up to *limit* memory rows sorted by similarity."""
+Commands
 
-    async def _run() -> None:
-        store = _get_store()
-        results = await store.search_memory(query, limit)
-        await _safe_close(store)
-        if not results:
-            rprint("[yellow]No matches found.[/]")
-            return
-        for mem, score in results:
-            rprint(f"[bold]{score:.3f}[/] {mem.text} [dim]{mem.id}[/]")
+---------------------------------------------------------------------------
 
-    asyncio.run(_run())
+@app.command() def add( text: str = typer.Argument(..., help="Text to remember."), importance: float = typer.Option(0.5, help="0‑1 importance weighting."), metadata: str | None = typer.Option(None, "--metadata", callback=_metadata_option, help="Arbitrary JSON metadata."), url: str = typer.Option(os.getenv(API_URL_ENV, DEFAULT_API), "--url", show_default="env/localhost"), ):  # noqa: D401 """Add a new memory row to the store."""
 
+async def _run() -> None:
+    async with _client(url) as client:
+        payload = {"text": text, "importance": importance, "metadata": metadata or {}}
+        rprint(f"[grey]POST {url}/memory/add …")
+        resp = await client.post("/memory/add", json=payload)
+        resp.raise_for_status()
+        rprint(Panel("Memory ID → [bold green]" + resp.json()["id"]))
 
-@app.command(help="Delete a memory row by its UUID.")
-def delete(memory_id: str = typer.Argument(..., help="Memory UUID")) -> None:
-    async def _run() -> None:
-        store = _get_store()
-        await store.delete_memory(memory_id)
-        await _safe_close(store)
-        rprint("[green]✓ Deleted.")
+asyncio.run(_run())
 
-    asyncio.run(_run())
+@app.command() def search( query: str = typer.Argument(..., help="Search query."), k: int = typer.Option(5, help="Number of results."), url: str = typer.Option(os.getenv(API_URL_ENV, DEFAULT_API), "--url", show_default="env/localhost"), ):  # noqa: D401 """Semantic search in the memory vector store."""
 
+async def _run() -> None:
+    async with _client(url) as client:
+        params = {"q": query, "k": k}
+        rprint(f"[grey]GET {url}/memory/search?q={query}&k={k} …")
+        resp = await client.get("/memory/search", params=params)
+        resp.raise_for_status()
+        results = resp.json()
 
-@app.command("import-json", help="Bulk‑import memories from newline‑delimited JSON file.")
-def import_json(
-    path: Path = typer.Argument(..., exists=True, readable=True, help="NDJSON file path"),
-):
-    async def _run() -> None:
-        store = _get_store()
-        imported = 0
-        with path.open("r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    obj = json.loads(line)
-                    await store.add_memory(obj["text"], obj.get("metadata"))
-                    imported += 1
-                except Exception as exc:  # pragma: no cover
-                    rprint(f"[red]Skipping line:[/] {exc}")
-        await _safe_close(store)
-        rprint(f"[green]✓ Imported {imported} memories.[/]")
+        table = Table(title=f"Top‑{k} results for '{query}'")
+        table.add_column("Score", justify="right")
+        table.add_column("Text", justify="left")
 
-    asyncio.run(_run())
+        for row in results:
+            table.add_row(f"{row['score']:.2f}", row["text"][:80] + ("…" if len(row["text"]) > 80 else ""))
 
+        rprint(table)
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+asyncio.run(_run())
 
+@app.command() def delete( mem_id: str = typer.Argument(..., help="Memory ID to delete."), url: str = typer.Option(os.getenv(API_URL_ENV, DEFAULT_API), "--url", show_default="env/localhost"), ):  # noqa: D401 """Delete a memory by ID."""
 
-def main() -> None:  # pragma: no cover
-    """CLI entry‑point used by `python -m memory_system.cli`."""
+async def _run() -> None:
+    async with _client(url) as client:
+        rprint(f"[grey]DELETE {url}/memory/{mem_id} …")
+        resp = await client.delete(f"/memory/{mem_id}")
+        resp.raise_for_status()
+        rprint(Panel("Deleted ✔", style="bold red"))
 
-    try:
-        app()
-    except Exception as exc:
-        rprint(f"[red]Error:[/] {exc}")
-        sys.exit(1)
+asyncio.run(_run())
 
+@app.command() def import_json( file: Path = typer.Argument(..., exists=True, readable=True, help="JSON lines file (one memory per line)."), url: str = typer.Option(os.getenv(API_URL_ENV, DEFAULT_API), "--url", show_default="env/localhost"), ):  # noqa: D401 """Bulk‑import memories from a .jsonl file."""
 
-if __name__ == "__main__":  # pragma: no cover
-    main()
+async def _run() -> None:
+    async with _client(url) as client:
+        added = 0
+        async with asyncio.Semaphore(8):
+            for line in file.read_text().splitlines():
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                resp = await client.post("/memory/add", json=payload)
+                resp.raise_for_status()
+                added += 1
+        rprint(Panel(f"Imported [bold green]{added}[/] memories"))
+
+asyncio.run(_run())
+
+if name == "main":  # pragma: no cover app()  # Typer dispatch
